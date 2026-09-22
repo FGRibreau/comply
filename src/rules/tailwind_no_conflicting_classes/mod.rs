@@ -110,7 +110,8 @@ pub(crate) fn text_category(class: &str) -> Option<&'static str> {
 /// True when `token` (the `text-` suffix, opacity already stripped) is a real
 /// Tailwind/shadcn text-color value:
 /// - a CSS color keyword (`inherit`, `transparent`, `black`, …);
-/// - a single semantic CSS-variable color (`primary`, `muted`, custom `brand`);
+/// - a single-word semantic color from the shadcn/status vocabulary
+///   (`primary`, `muted`, `destructive`, `success`, …);
 /// - a palette name ending in a numeric shade (`red-500`, `neutral-50`);
 /// - a shadcn `*-foreground` compound at any depth (`muted-foreground`,
 ///   `sidebar-primary-foreground`).
@@ -118,22 +119,23 @@ pub(crate) fn text_category(class: &str) -> Option<&'static str> {
 /// Descriptive multi-segment tokens whose final segment is neither a shade nor
 /// `foreground` (Material/Vuetify typography & emphasis scales like
 /// `title-large`, `medium-emphasis`) are rejected — they are not Tailwind
-/// utilities and must not be grouped into the conflict bucket.
+/// utilities and must not be grouped into the conflict bucket. Unknown single
+/// words are rejected too: a Tailwind v4 theme can declare them as font sizes
+/// (`--text-caption`, `--text-heading`), so bucketing them as colours would
+/// flag `text-caption text-muted-foreground` as a colour conflict.
 fn is_text_color_token(token: &str) -> bool {
     const COLOR_KEYWORDS: &[&str] = &["inherit", "current", "transparent", "black", "white"];
-    if COLOR_KEYWORDS.contains(&token) {
+    const SEMANTIC_COLORS: &[&str] = &[
+        "background", "foreground", "primary", "secondary", "muted", "accent",
+        "destructive", "card", "popover", "border", "input", "ring", "sidebar",
+        "brand", "success", "warning", "info", "danger", "error",
+    ];
+    if COLOR_KEYWORDS.contains(&token) || SEMANTIC_COLORS.contains(&token) {
         return true;
     }
-    if token.is_empty() {
-        return false;
-    }
-    let Some(last) = token.rsplit('-').next() else {
+    let Some((_, last)) = token.rsplit_once('-') else {
         return false;
     };
-    if !token.contains('-') {
-        // Single semantic CSS-variable color (`primary`, `muted`, `brand`).
-        return true;
-    }
     // Palette + numeric shade (`red-500`) or the shadcn `*-foreground` compound.
     (!last.is_empty() && last.chars().all(|c| c.is_ascii_digit())) || last == "foreground"
 }
@@ -355,6 +357,22 @@ mod text_category_tests {
         );
         // Opacity modifier on a palette color (`text-red-500/50`) still color.
         assert_eq!(text_category("text-red-500/50"), Some("text-color"));
+    }
+}
+
+#[cfg(test)]
+mod theme_font_size_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_single_word_is_not_text_color() {
+        // natalia v3 declares `--text-caption`, `--text-heading` and
+        // `--text-figure` as font sizes in its Tailwind v4 `@theme`; they must
+        // not share the colour key with `text-muted-foreground`.
+        for token in ["text-caption", "text-heading", "text-figure"] {
+            assert_eq!(text_category(token), None, "{token}");
+        }
+        assert_eq!(text_category("text-destructive"), Some("text-color"));
     }
 }
 

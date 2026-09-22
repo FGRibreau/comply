@@ -160,6 +160,25 @@ mod tests {
     }
 
     #[test]
+    fn allows_theme_font_size_with_text_color() {
+        // natalia v3 `multi-select-filter-header.tsx`: `text-caption` is a
+        // `--text-caption` font size from the Tailwind v4 `@theme`, not a colour.
+        assert!(
+            run(r#"const x = <p className="text-muted-foreground text-caption px-1.5 py-1 font-medium" />;"#).is_empty()
+        );
+        assert!(run(r#"const x = <h2 className="text-heading text-foreground" />;"#).is_empty());
+    }
+
+    #[test]
+    fn flags_conflicting_text_colors() {
+        assert_eq!(run(r#"const x = <p className="text-red-500 text-blue-500" />;"#).len(), 1);
+        assert_eq!(
+            run(r#"const x = <p className="text-muted-foreground text-foreground" />;"#).len(),
+            1
+        );
+    }
+
+    #[test]
     fn flags_conflicting_bg_color() {
         let diags = run(r#"const x = <div className="bg-red-500 bg-blue-500" />;"#);
         assert_eq!(diags.len(), 1);

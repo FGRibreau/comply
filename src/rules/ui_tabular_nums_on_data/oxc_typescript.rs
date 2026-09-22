@@ -1,22 +1,11 @@
 //! ui-tabular-nums-on-data OXC backend — flag JSX elements whose className
-//! contains numeric-data hints but lacks `tabular-nums`.
+//! contains a numeric-data hint word but lacks `tabular-nums`.
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::oxc_helpers::byte_offset_to_line_col;
 use crate::rules::backend::{AstKind, AstType, CheckCtx, OxcCheck};
 use oxc_ast::ast::JSXAttributeItem;
 use std::sync::Arc;
-
-const DATA_HINTS: &[&str] = &[
-    "counter",
-    "count",
-    "price",
-    "amount",
-    "metric",
-    "stat",
-    "number",
-    "value-display",
-];
 
 pub struct Check;
 
@@ -46,11 +35,10 @@ fn check_class(
     ctx: &CheckCtx,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let lower = cls.to_ascii_lowercase();
-    let has_hint = DATA_HINTS.iter().any(|h| lower.contains(h));
-    if !has_hint {
+    if !super::has_data_hint(cls) {
         return;
     }
+    let lower = cls.to_ascii_lowercase();
     if lower.contains("tabular-nums")
         || lower.contains("tabular-numbers")
         || lower.contains("font-variant-numeric")
@@ -89,5 +77,50 @@ impl OxcCheck for Check {
         if let Some(cls) = extract_class_value(&opening.attributes) {
             check_class(cls, opening.span.start, ctx, diagnostics);
         }
+    }
+}
+
+#[cfg(test)]
+impl crate::rules::test_helpers::RunRule for Check {
+    fn meta(&self) -> &'static crate::rules::meta::RuleMeta {
+        &super::META
+    }
+    fn execute_with_ctx(
+        &self,
+        src: &str,
+        path: &std::path::Path,
+        project: &crate::project::ProjectCtx,
+        file: &crate::rules::file_ctx::FileCtx,
+    ) -> Vec<crate::diagnostic::Diagnostic> {
+        crate::rules::test_helpers::run_oxc_check(self, src, path, project, file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(source: &str) -> Vec<Diagnostic> {
+        crate::rules::test_helpers::run_rule(&Check, source, "t.tsx")
+    }
+
+    #[test]
+    fn flags_stat_class_without_tabular_nums() {
+        assert_eq!(run(r#"const x = <span className="stat-value text-2xl" />;"#).len(), 1);
+    }
+
+    #[test]
+    fn allows_stat_class_with_tabular_nums() {
+        assert!(run(r#"const x = <span className="stat-value tabular-nums" />;"#).is_empty());
+    }
+
+    #[test]
+    fn ignores_state_data_attribute_variant() {
+        // natalia v3 `team-switcher.tsx`: `group-data-[state=collapsed]:*`
+        // contains `stat` only inside the word `state`.
+        assert!(
+            run(r#"const x = <div className="grid min-w-0 flex-1 text-left leading-tight group-data-[state=collapsed]:hidden" />;"#)
+                .is_empty()
+        );
     }
 }

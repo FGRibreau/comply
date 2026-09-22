@@ -8,24 +8,12 @@
 
 use crate::diagnostic::{Diagnostic, Severity};
 
-const DATA_HINTS: &[&str] = &[
-    "counter",
-    "count",
-    "price",
-    "amount",
-    "metric",
-    "stat",
-    "number",
-    "value-display",
-];
-
 crate::ast_check! { on ["rule_set"] => |node, source, ctx, diagnostics|
     let Some(selectors) = node.child_by_field_name("selectors")
         .or_else(|| node.named_child(0))
     else { return };
     let Ok(selector_text) = selectors.utf8_text(source) else { return };
-    let lower_sel = selector_text.to_ascii_lowercase();
-    if !DATA_HINTS.iter().any(|h| lower_sel.contains(h)) { return; }
+    if !super::has_data_hint(selector_text) { return; }
 
     // Block text — covers `font-variant-numeric: tabular-nums` and
     // shorthand `tabular-nums` from postcss-tailwind-style transforms.
