@@ -214,6 +214,23 @@ mod tests {
     }
 
     #[test]
+    fn allows_corner_over_rounded_shorthand() {
+        // natalia v3 `agent-card.tsx`: a speech bubble squares its top-left
+        // corner over the four-corner shorthand.
+        assert!(run(r#"const x = <div className="rounded-xl rounded-tl-sm" />;"#).is_empty());
+    }
+
+    #[test]
+    fn flags_two_rounded_shorthands() {
+        assert_eq!(run(r#"const x = <div className="rounded-xl rounded-lg" />;"#).len(), 1);
+    }
+
+    #[test]
+    fn flags_same_corner_twice() {
+        assert_eq!(run(r#"const x = <div className="rounded-tl-sm rounded-tl-lg" />;"#).len(), 1);
+    }
+
+    #[test]
     fn flags_conflicting_gap_x_same_axis() {
         let diags = run(r#"const x = <div className="gap-x-4 gap-x-8" />;"#);
         assert_eq!(diags.len(), 1);

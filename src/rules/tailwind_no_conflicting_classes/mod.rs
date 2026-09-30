@@ -23,13 +23,13 @@ pub const META: RuleMeta = RuleMeta {
 
 /// Prefixes whose values are unambiguously mutually exclusive — any two
 /// classes sharing one of these prefixes conflict. Ambiguous prefixes
-/// (`text-`, `font-`, `flex-`, `border-`, `bg-`, `shadow-`) are handled by
+/// (`text-`, `font-`, `flex-`, `border-`, `bg-`, `shadow-`, `rounded-`) are handled by
 /// dedicated sub-categorisation functions that split by CSS sub-property.
 pub(crate) const CONFLICT_PREFIXES: &[&str] = &[
     "p-", "px-", "py-", "pt-", "pr-", "pb-", "pl-",
     "m-", "mx-", "my-", "mt-", "mr-", "mb-", "ml-",
     "w-", "h-", "min-w-", "min-h-", "max-w-", "max-h-",
-    "rounded-", "opacity-", "z-",
+    "opacity-", "z-",
     "gap-", "gap-x-", "gap-y-", "grid-cols-", "grid-rows-", "justify-", "items-", "self-", "order-", "overflow-",
 ];
 
@@ -205,6 +205,32 @@ fn border_side_is_color(value: &str) -> bool {
     is_text_color_token(value)
 }
 
+/// Splits `rounded-*` by the corner or side it rounds. A corner or side utility
+/// (`rounded-tl-sm`, `rounded-t-lg`, `rounded-s-md`) layered on the four-corner
+/// shorthand (`rounded-xl`) is the speech-bubble pattern: Tailwind emits the
+/// scoped utility after the shorthand, so the corner wins as intended. Each
+/// corner or side gets its own key, and only two utilities on the same one
+/// conflict (`rounded-xl rounded-lg`, `rounded-tl-sm rounded-tl-lg`). The
+/// per-corner analogue of the `border_category` per-side split
+/// (rbaumier/comply#4561).
+pub(crate) fn rounded_category(class: &str) -> Option<&'static str> {
+    let suffix = &class["rounded-".len()..];
+    // Two-letter scopes first, so `tl` is not read as `t` + `l-…`.
+    for (scope, key) in [
+        ("tl", "rounded-tl"), ("tr", "rounded-tr"), ("br", "rounded-br"), ("bl", "rounded-bl"),
+        ("ss", "rounded-ss"), ("se", "rounded-se"), ("es", "rounded-es"), ("ee", "rounded-ee"),
+        ("t", "rounded-t"), ("r", "rounded-r"), ("b", "rounded-b"), ("l", "rounded-l"),
+        ("s", "rounded-s"), ("e", "rounded-e"),
+    ] {
+        match suffix.strip_prefix(scope) {
+            Some("") => return Some(key),                      // bare `rounded-tl`
+            Some(rest) if rest.starts_with('-') => return Some(key), // `rounded-tl-<value>`
+            _ => {}
+        }
+    }
+    Some("rounded")
+}
+
 pub(crate) fn font_category(class: &str) -> Option<&'static str> {
     match class {
         "font-sans" | "font-serif" | "font-mono" => Some("font-family"),
@@ -268,6 +294,7 @@ pub(crate) fn conflict_key(class: &str) -> Option<&'static str> {
     if class.starts_with("font-") { return font_category(class); }
     if class.starts_with("bg-") { return bg_category(class); }
     if class.starts_with("shadow-") { return shadow_category(class); }
+    if class.starts_with("rounded-") { return rounded_category(class); }
 
     let mut prefixes: Vec<&&str> = CONFLICT_PREFIXES.iter().collect();
     prefixes.sort_by_key(|p| std::cmp::Reverse(p.len()));
@@ -460,6 +487,43 @@ mod border_category_tests {
         assert_eq!(conflict_key("border-4"), Some("border-width"));
         assert_eq!(conflict_key("border-red-500"), Some("border-color"));
         assert_eq!(conflict_key("border-border"), Some("border-color"));
+    }
+}
+
+#[cfg(test)]
+mod rounded_category_tests {
+    use super::*;
+
+    #[test]
+    fn corner_over_shorthand_has_distinct_keys() {
+        // natalia v3 speech bubble: `rounded-xl rounded-tl-sm` squares one
+        // corner over the four-corner shorthand, which Tailwind orders after it.
+        assert_eq!(conflict_key("rounded-xl"), Some("rounded"));
+        assert_eq!(conflict_key("rounded-tl-sm"), Some("rounded-tl"));
+        assert_ne!(conflict_key("rounded-xl"), conflict_key("rounded-tl-sm"));
+    }
+
+    #[test]
+    fn every_corner_and_side_keeps_its_own_key() {
+        for scope in ["tl", "tr", "br", "bl", "ss", "se", "es", "ee", "t", "r", "b", "l", "s", "e"] {
+            let class = format!("rounded-{scope}-lg");
+            assert_ne!(conflict_key(&class), conflict_key("rounded-lg"), "{class}");
+            assert_eq!(conflict_key(&class), conflict_key(&format!("rounded-{scope}")), "{class}");
+        }
+    }
+
+    #[test]
+    fn shorthand_values_are_not_read_as_scopes() {
+        // `sm`, `lg`, `none`, `full` start with a scope letter but are values.
+        for value in ["sm", "md", "lg", "xl", "2xl", "none", "full", "[4px]"] {
+            assert_eq!(conflict_key(&format!("rounded-{value}")), Some("rounded"), "{value}");
+        }
+    }
+
+    #[test]
+    fn same_scope_still_conflicts() {
+        assert_eq!(conflict_key("rounded-xl"), conflict_key("rounded-lg"));
+        assert_eq!(conflict_key("rounded-tl-sm"), conflict_key("rounded-tl-lg"));
     }
 }
 
