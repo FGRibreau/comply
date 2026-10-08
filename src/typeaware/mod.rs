@@ -186,6 +186,26 @@ fn run_sidecar(project_dir: &Path, request: &str) -> Result<Option<SidecarRespon
         .spawn()
         .context("failed to spawn node for the type-aware sidecar")?;
 
+    // A response can outgrow the pipe buffer.
+    // Draining it only after the wait deadlocks.
+    let mut out_pipe = child
+        .stdout
+        .take()
+        .context("sidecar stdout unavailable")?;
+    let mut err_pipe = child
+        .stderr
+        .take()
+        .context("sidecar stderr unavailable")?;
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        out_pipe.read_to_string(&mut buf).map(|_| buf)
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = err_pipe.read_to_string(&mut buf);
+        buf
+    });
+
     child
         .stdin
         .take()
@@ -206,17 +226,13 @@ fn run_sidecar(project_dir: &Path, request: &str) -> Result<Option<SidecarRespon
         return Ok(None);
     };
 
-    let mut stdout = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        out.read_to_string(&mut stdout)
-            .context("failed to read sidecar output")?;
-    }
+    let stdout = out_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("the type-aware sidecar output reader panicked"))?
+        .context("failed to read sidecar output")?;
 
     let response: SidecarResponse = serde_json::from_str(&stdout).with_context(|| {
-        let mut stderr = String::new();
-        if let Some(mut err) = child.stderr.take() {
-            let _ = err.read_to_string(&mut stderr);
-        }
+        let stderr = err_reader.join().unwrap_or_default();
         format!("failed to parse type-aware sidecar output. sidecar stderr: {stderr}")
     })?;
     Ok(Some(response))
