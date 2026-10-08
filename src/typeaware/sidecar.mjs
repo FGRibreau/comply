@@ -2,8 +2,8 @@
 //
 // Driven by comply's Rust process, once per run. Reads a single
 // JSON request on stdin, builds the TypeScript program once via typescript-go
-// (@typescript/native-preview), runs the enabled type-aware rules against it,
-// and writes a single JSON response on stdout.
+// (typescript >= 7, or @typescript/native-preview), runs the enabled type-aware
+// rules against it, and writes a single JSON response on stdout.
 //
 // Request:  { "tsconfig": string, "files": string[], "rules": string[],
 //             "config"?: { [ruleId: string]: { [key: string]: number } } }
@@ -11,9 +11,11 @@
 //   Diag:   { "file": string, "line": number, "column": number,
 //             "rule": string, "message": string }
 //
-// The @typescript/native-preview package is resolved from the linted project's
-// node_modules (comply spawns this script with cwd = project root); a missing
-// package yields { error: "package-not-found" }, which comply reports as a
+// The typescript-go API is resolved from the linted project's node_modules
+// (comply spawns this script with cwd = project root): `typescript/unstable/*`
+// first, which only typescript >= 7 exports, then the frozen
+// `@typescript/native-preview/unstable/*`. When neither resolves, the sidecar
+// yields { error: "package-not-found" }, which comply reports as a
 // toolchain gap — it names the install command and aborts the run rather than
 // under-report the type-aware rules.
 
@@ -40,15 +42,19 @@ const enabled = new Set(rules);
 // Resolve the typescript-go API from the project's node_modules.
 const require = createRequire(path.join(process.cwd(), "comply-typeaware-resolver.js"));
 let apiMod, ast, TypeFlags;
-try {
-  const apiPath = require.resolve("@typescript/native-preview/unstable/sync");
-  const astPath = require.resolve("@typescript/native-preview/unstable/ast");
-  apiMod = await import(pathToFileURL(apiPath).href);
-  ast = await import(pathToFileURL(astPath).href);
-  TypeFlags = apiMod.TypeFlags;
-} catch {
-  fail("package-not-found");
+for (const pkg of ["typescript", "@typescript/native-preview"]) {
+  try {
+    const apiPath = require.resolve(`${pkg}/unstable/sync`);
+    const astPath = require.resolve(`${pkg}/unstable/ast`);
+    apiMod = await import(pathToFileURL(apiPath).href);
+    ast = await import(pathToFileURL(astPath).href);
+    TypeFlags = apiMod.TypeFlags;
+    break;
+  } catch {
+    apiMod = undefined; // typescript 5 has no such subpath: try the next one.
+  }
 }
+if (!apiMod) fail("package-not-found");
 
 const { API } = apiMod;
 const { SyntaxKind, computeLineStarts, getTokenPosOfNode } = ast;

@@ -3,9 +3,10 @@
 //! Runs comply's custom type-aware rules (`Backend::TypeAware`) that need a
 //! resolved TypeScript program — type queries, structural comparison — which
 //! no in-process tree-sitter pass can answer. comply drives a TypeScript
-//! checker (typescript-go via `@typescript/native-preview`) through a Node
-//! sidecar: it sends the tsconfig + file list + enabled rule ids, the sidecar
-//! builds the program once and returns the violations as JSON.
+//! checker (typescript-go, from `typescript` >= 7 or else
+//! `@typescript/native-preview`) through a Node sidecar: it sends the tsconfig
+//! + file list + enabled rule ids, the sidecar builds the program once and
+//! returns the violations as JSON.
 //!
 //! Invoked when at least one rule needing that program is still enabled for
 //! the project (`main::type_aware_rules_active`). Building the program
@@ -14,10 +15,10 @@
 //!
 //! Failure handling splits by cause, because silently skipping the phase makes
 //! a clean exit indistinguishable from "the toolchain wasn't there". A
-//! *toolchain* failure — `node` absent, `@typescript/native-preview`
-//! unresolved, the checker API failing to initialize, or the program snapshot
-//! failing — is a hard `ToolchainError`: non-zero exit, and the remedy comply
-//! knows. A missing tsconfig (nothing to type-check) and a sidecar timeout (a
+//! *toolchain* failure — `node` absent, neither `typescript` >= 7 nor
+//! `@typescript/native-preview` resolvable, the checker API failing to
+//! initialize, or the program snapshot failing — is a hard `ToolchainError`:
+//! non-zero exit, and the remedy comply knows. A missing tsconfig (nothing to type-check) and a sidecar timeout (a
 //! hang, not a toolchain gap) stay graceful: a one-line stderr notice and no
 //! diagnostics.
 
@@ -247,9 +248,10 @@ fn sidecar_error(err: &str) -> ToolchainError {
     if err == "package-not-found" {
         ToolchainError::Missing {
             what: "type-aware analysis needs the typescript-go API, but \
-                   @typescript/native-preview could not be resolved from the project"
+                   neither typescript >= 7 nor @typescript/native-preview could be resolved \
+                   from the project"
                 .to_owned(),
-            install_cmd: "npm install --save-dev @typescript/native-preview".to_owned(),
+            install_cmd: "npm install --save-dev typescript@^7".to_owned(),
         }
     } else {
         ToolchainError::Unusable {
@@ -382,7 +384,7 @@ mod tests {
         let err = sidecar_error("package-not-found");
         assert!(
             matches!(&err, ToolchainError::Missing { install_cmd, .. }
-                if install_cmd == "npm install --save-dev @typescript/native-preview"),
+                if install_cmd == "npm install --save-dev typescript@^7"),
             "{err:?}"
         );
         assert!(
