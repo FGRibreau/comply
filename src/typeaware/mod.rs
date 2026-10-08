@@ -3,8 +3,8 @@
 //! Runs comply's custom type-aware rules (`Backend::TypeAware`) that need a
 //! resolved TypeScript program — type queries, structural comparison — which
 //! no in-process tree-sitter pass can answer. comply drives a TypeScript
-//! checker (typescript-go, from `typescript` >= 7 or else
-//! `@typescript/native-preview`) through a Node sidecar: it sends the tsconfig
+//! checker (typescript-go, from `typescript` >= 7, its side-by-side alias
+//! `@typescript/native`, or else `@typescript/native-preview`) through a Node sidecar: it sends the tsconfig
 //! + file list + enabled rule ids, the sidecar builds the program once and
 //! returns the violations as JSON.
 //!
@@ -15,8 +15,8 @@
 //!
 //! Failure handling splits by cause, because silently skipping the phase makes
 //! a clean exit indistinguishable from "the toolchain wasn't there". A
-//! *toolchain* failure — `node` absent, neither `typescript` >= 7 nor
-//! `@typescript/native-preview` resolvable, the checker API failing to
+//! *toolchain* failure — `node` absent, none of `typescript` >= 7,
+//! `@typescript/native` or `@typescript/native-preview` resolvable, the checker API failing to
 //! initialize, or the program snapshot failing — is a hard `ToolchainError`:
 //! non-zero exit, and the remedy comply knows. A missing tsconfig (nothing to type-check) and a sidecar timeout (a
 //! hang, not a toolchain gap) stay graceful: a one-line stderr notice and no
@@ -248,8 +248,8 @@ fn sidecar_error(err: &str) -> ToolchainError {
     if err == "package-not-found" {
         ToolchainError::Missing {
             what: "type-aware analysis needs the typescript-go API, but \
-                   neither typescript >= 7 nor @typescript/native-preview could be resolved \
-                   from the project"
+                   none of typescript >= 7, @typescript/native or \
+                   @typescript/native-preview could be resolved from the project"
                 .to_owned(),
             install_cmd: "npm install --save-dev typescript@^7".to_owned(),
         }
@@ -392,6 +392,7 @@ mod tests {
                 .starts_with("type-aware analysis needs the typescript-go API"),
             "{err}"
         );
+        assert!(err.to_string().contains("@typescript/native or"), "{err}");
     }
 
     // An api-init / snapshot cause is a hard error too, but no single command

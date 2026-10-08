@@ -176,12 +176,13 @@ mod tests {
 
     // ── failure reporting (#8109) ───────────────────────────────────────────
 
-    fn native_preview_missing() -> anyhow::Error {
+    fn typescript_go_api_missing() -> anyhow::Error {
         toolchain::ToolchainError::Missing {
             what: "type-aware analysis needs the typescript-go API, but \
-                   @typescript/native-preview could not be resolved from the project"
+                   none of typescript >= 7, @typescript/native or \
+                   @typescript/native-preview could be resolved from the project"
                 .to_owned(),
-            install_cmd: "npm install --save-dev @typescript/native-preview".to_owned(),
+            install_cmd: "npm install --save-dev typescript@^7".to_owned(),
         }
         .into()
     }
@@ -190,12 +191,13 @@ mod tests {
     /// the user gets the install command, not a bug-report banner.
     #[test]
     fn a_toolchain_gap_reports_the_install_command() {
-        let msg = failure_message(&native_preview_missing());
+        let msg = failure_message(&typescript_go_api_missing());
         assert_eq!(
             msg,
             "comply: type-aware analysis needs the typescript-go API, but \
-             @typescript/native-preview could not be resolved from the project.\n\
-             Install it with: npm install --save-dev @typescript/native-preview"
+             none of typescript >= 7, @typescript/native or \
+             @typescript/native-preview could be resolved from the project.\n\
+             Install it with: npm install --save-dev typescript@^7"
         );
         assert!(!msg.contains("crashed unexpectedly"), "{msg}");
         assert!(!msg.contains("github.com/rbaumier/comply/issues"), "{msg}");
@@ -206,7 +208,7 @@ mod tests {
     #[test]
     fn a_toolchain_gap_is_recognised_under_added_context() {
         use anyhow::Context;
-        let wrapped = Err::<(), _>(native_preview_missing())
+        let wrapped = Err::<(), _>(typescript_go_api_missing())
             .context("failed to lint TypeScript")
             .unwrap_err();
         assert!(

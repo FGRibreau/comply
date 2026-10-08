@@ -91,7 +91,7 @@ fn empty_directory_returns_clean() {
 // Regression for #5941: type-aware is on by default, but a project with no
 // tsconfig.json has nothing to type-check — that must stay a graceful skip,
 // never a hard failure. Only an explicit toolchain-config gap (missing node /
-// @typescript/native-preview) fails loud.
+// the typescript-go API) fails loud.
 //
 // The graceful no-tsconfig skip is only reached after the node-availability
 // check passes, so the contract has a node precondition: with `node` on PATH

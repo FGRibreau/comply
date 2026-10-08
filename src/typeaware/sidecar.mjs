@@ -2,7 +2,8 @@
 //
 // Driven by comply's Rust process, once per run. Reads a single
 // JSON request on stdin, builds the TypeScript program once via typescript-go
-// (typescript >= 7, or @typescript/native-preview), runs the enabled type-aware
+// (typescript >= 7, its side-by-side alias @typescript/native, or
+// @typescript/native-preview), runs the enabled type-aware
 // rules against it, and writes a single JSON response on stdout.
 //
 // Request:  { "tsconfig": string, "files": string[], "rules": string[],
@@ -13,8 +14,10 @@
 //
 // The typescript-go API is resolved from the linted project's node_modules
 // (comply spawns this script with cwd = project root): `typescript/unstable/*`
-// first, which only typescript >= 7 exports, then the frozen
-// `@typescript/native-preview/unstable/*`. When neither resolves, the sidecar
+// first, which only typescript >= 7 exports, then `@typescript/native/unstable/*`
+// (the alias Microsoft documents for running TypeScript 7 beside
+// `typescript` 6), then the frozen `@typescript/native-preview/unstable/*`.
+// When none resolves, the sidecar
 // yields { error: "package-not-found" }, which comply reports as a
 // toolchain gap — it names the install command and aborts the run rather than
 // under-report the type-aware rules.
@@ -42,7 +45,11 @@ const enabled = new Set(rules);
 // Resolve the typescript-go API from the project's node_modules.
 const require = createRequire(path.join(process.cwd(), "comply-typeaware-resolver.js"));
 let apiMod, ast, TypeFlags;
-for (const pkg of ["typescript", "@typescript/native-preview"]) {
+for (const pkg of [
+  "typescript",
+  "@typescript/native",
+  "@typescript/native-preview",
+]) {
   try {
     const apiPath = require.resolve(`${pkg}/unstable/sync`);
     const astPath = require.resolve(`${pkg}/unstable/ast`);
@@ -51,7 +58,7 @@ for (const pkg of ["typescript", "@typescript/native-preview"]) {
     TypeFlags = apiMod.TypeFlags;
     break;
   } catch {
-    apiMod = undefined; // typescript 5 has no such subpath: try the next one.
+    apiMod = undefined; // typescript 5 or 6 has no such subpath: try the next one.
   }
 }
 if (!apiMod) fail("package-not-found");

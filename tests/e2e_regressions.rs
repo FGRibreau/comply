@@ -340,7 +340,7 @@ fn diff_only_survives_a_non_utf8_file_in_the_diff_issue_8502() {
 
 #[test]
 fn missing_type_aware_toolchain_is_an_instruction_not_a_crash_issue_8109() {
-    // A TypeScript project with a tsconfig.json but no `@typescript/native-preview`
+    // A TypeScript project with a tsconfig.json but no typescript-go API package
     // in its node_modules is every repo you clone. comply diagnoses that gap
     // itself and knows the remedy, so it must answer like `rustup component add
     // clippy` does — never "crashed unexpectedly" with a bug-report URL.
