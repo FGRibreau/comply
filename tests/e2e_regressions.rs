@@ -847,3 +847,31 @@ fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
     assert!(fixed.contains("is_empty()"), "{fixed}");
     assert!(fixed.contains("x >= 1 && x < 10"), "{fixed}");
 }
+
+#[test]
+fn clippy_that_cannot_compile_is_an_error_not_all_clear() {
+    // rustc's own errors carry no `clippy::` code.
+    // comply dropped them and printed "all clear".
+    // It must fail and say why.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"broken\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n",
+    )
+    .unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(
+        dir.path().join("src/lib.rs"),
+        "/// Returns one.\npub fn one() -> u32 {\n    \"one\"\n}\n",
+    )
+    .unwrap();
+
+    common::comply()
+        .arg(dir.path())
+        .env("CARGO_TARGET_DIR", dir.path().join("target"))
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("all clear").not())
+        .stderr(predicate::str::contains("cargo clippy could not compile"))
+        .stderr(predicate::str::contains("mismatched types"));
+}
