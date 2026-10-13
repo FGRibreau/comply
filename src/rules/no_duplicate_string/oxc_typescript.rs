@@ -5,14 +5,10 @@ use rustc_hash::FxHashMap;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::oxc_helpers::byte_offset_to_line_col;
 use crate::rules::backend::{AstKind, CheckCtx, OxcCheck};
+use crate::rules::tailwind_class_strings::CLASS_HELPERS;
 use std::sync::Arc;
 
 pub struct Check;
-
-/// Identifiers of helpers that compose Tailwind class strings.
-const TAILWIND_HELPERS: &[&str] = &[
-    "cn", "clsx", "classnames", "cva", "tw", "twMerge", "twJoin", "clx",
-];
 
 impl OxcCheck for Check {
     fn run_on_semantic<'a>(
@@ -155,7 +151,7 @@ fn should_ignore_oxc_node<'a>(
                     _ => None,
                 };
                 if let Some(name) = callee_name
-                    && TAILWIND_HELPERS.contains(&name) {
+                    && CLASS_HELPERS.contains(&name) {
                         return true;
                     }
             }
