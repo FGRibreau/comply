@@ -1,0 +1,38 @@
+//! no-restricted-identifier-terms — flag a declared name containing a banned term.
+
+mod oxc_typescript;
+
+use crate::diagnostic::Severity;
+use crate::files::Language;
+use crate::rules::RuleDef;
+use crate::rules::backend::Backend;
+use crate::rules::meta::RuleMeta;
+
+pub const META: RuleMeta = RuleMeta {
+    id: "no-restricted-identifier-terms",
+    description: "Declared name contains a term the project bans, matched case-insensitively as a substring.",
+    remediation: "Rename the symbol without the term. List banned terms via `terms = [\"shape\"]` in comply.toml.",
+    severity: Severity::Error,
+    doc_url: None,
+    categories: &["naming"],
+
+    skip_in_test_dir: false,
+    skip_in_relaxed_dir: false,
+};
+
+pub fn register() -> RuleDef {
+    RuleDef {
+        meta: META,
+        backends: vec![
+            (
+                Language::TypeScript,
+                Backend::Oxc(Box::new(oxc_typescript::Check)),
+            ),
+            (
+                Language::JavaScript,
+                Backend::Oxc(Box::new(oxc_typescript::Check)),
+            ),
+            (Language::Tsx, Backend::Oxc(Box::new(oxc_typescript::Check))),
+        ],
+    }
+}

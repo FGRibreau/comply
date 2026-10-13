@@ -118,6 +118,14 @@ max = 3
 allowed = []
 banned = []
 
+# Banned substrings in declared names, e.g. `terms = ["shape"]`.
+[rules.no-restricted-identifier-terms]
+terms = []
+
+# Banned accesses, each entry `{ object, property, message }`.
+[rules.no-restricted-properties]
+entries = []
+
 [rules.id-length]
 min = 2
 # Uncomment to allowlist identifiers that are conventional at <2 chars:

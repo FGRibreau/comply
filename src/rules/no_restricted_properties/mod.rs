@@ -1,0 +1,40 @@
+//! no-restricted-properties — flag a banned `object.property` access.
+//!
+//! Keys and defaults: `src/config/defaults.toml`.
+
+mod oxc_typescript;
+
+use crate::diagnostic::Severity;
+use crate::files::Language;
+use crate::rules::RuleDef;
+use crate::rules::backend::Backend;
+use crate::rules::meta::RuleMeta;
+
+pub const META: RuleMeta = RuleMeta {
+    id: "no-restricted-properties",
+    description: "User-configured `object.property` access, bracket access or destructuring, each entry with its own message.",
+    remediation: "Follow the message of the entry; scope an allowed file with `[overrides.\"<glob>\"] disable`.",
+    severity: Severity::Error,
+    doc_url: None,
+    categories: &["code-quality"],
+
+    skip_in_test_dir: false,
+    skip_in_relaxed_dir: false,
+};
+
+pub fn register() -> RuleDef {
+    RuleDef {
+        meta: META,
+        backends: vec![
+            (
+                Language::TypeScript,
+                Backend::Oxc(Box::new(oxc_typescript::Check)),
+            ),
+            (
+                Language::JavaScript,
+                Backend::Oxc(Box::new(oxc_typescript::Check)),
+            ),
+            (Language::Tsx, Backend::Oxc(Box::new(oxc_typescript::Check))),
+        ],
+    }
+}
