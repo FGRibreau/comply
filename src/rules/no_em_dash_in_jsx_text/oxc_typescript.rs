@@ -2,8 +2,12 @@
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::oxc_helpers::byte_offset_to_line_col;
-use crate::rules::backend::{AstKind, AstType, CheckCtx, OxcCheck};
+use crate::rules::backend::{AstKind, CheckCtx, OxcCheck};
 use oxc_ast::ast::{JSXAttributeName, JSXAttributeValue, JSXElementName};
+use oxc_span::Span;
+use oxc_syntax::xml_entities::XML_ENTITIES;
+use regex::Regex;
+use serde::Deserialize;
 use std::sync::Arc;
 
 /// Elements whose children are technical content, not prose. A dash inside
@@ -12,72 +16,123 @@ const TECHNICAL_ELEMENTS: &[&str] = &["code", "pre"];
 
 pub struct Check;
 
+/// One `[[rules.no-em-dash-in-jsx-text.entries]]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EntryToml {
+    regex: String,
+    message: String,
+}
+
 impl OxcCheck for Check {
-    fn interested_kinds(&self) -> &'static [AstType] {
-        &[AstType::JSXText, AstType::JSXAttribute]
-    }
-
-    fn prefilter(&self) -> Option<&'static [&'static str]> {
-        // Skip the whole file unless it contains an em- or en-dash byte sequence.
-        Some(&["\u{2014}", "\u{2013}"])
-    }
-
-    fn run<'a>(
+    fn run_on_semantic<'a>(
         &self,
-        node: &oxc_semantic::AstNode<'a>,
-        ctx: &CheckCtx,
         semantic: &'a oxc_semantic::Semantic<'a>,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
-        match node.kind() {
-            AstKind::JSXText(text) => {
-                if inside_technical_element(node.id(), semantic) {
-                    return;
-                }
-                if super::is_standalone_dash(text.value.as_str()) {
-                    return;
-                }
-                let Some(rel) = super::first_dash_offset(text.value.as_str()) else {
-                    return;
-                };
-                self.report(ctx, text.span.start as usize + rel, diagnostics);
+        ctx: &CheckCtx,
+    ) -> Vec<Diagnostic> {
+        let id = super::META.id;
+        let needles = with_entities(ctx.config.required_string_list(id, "characters", ctx.lang));
+        let entries: Vec<(Regex, String)> = ctx
+            .config
+            .table_list(id, "entries", ctx.lang)
+            .into_iter()
+            .enumerate()
+            .map(|(index, table)| compile_entry(index, table))
+            .collect();
+        let all_strings = match ctx.config.string(id, "scope", ctx.lang) {
+            "jsx-copy" => false,
+            "all-strings" => true,
+            other => panic!(
+                "config key `[rules.\"{id}\"] scope` must be \"jsx-copy\" or \"all-strings\", got {other:?}"
+            ),
+        };
+        let mut diagnostics = Vec::new();
+        let mut scan = |start: usize, end: usize, is_jsx_text: bool| {
+            let text = &ctx.source[start..end];
+            let standalone = is_jsx_text && super::is_standalone_needle(&needles, text);
+            if let Some((rel, needle)) = super::first_needle_offset(&needles, text)
+                && !standalone
+            {
+                let message = format!(
+                    "`{needle}` in user-facing copy reads as AI-generated prose \u{2014} \
+                     remove it or rewrite the sentence."
+                );
+                diagnostics.push(report(ctx, start + rel, message));
             }
-            AstKind::JSXAttribute(attr) => {
-                let JSXAttributeName::Identifier(name) = &attr.name else {
-                    return;
-                };
-                if !super::COPY_ATTRS.contains(&name.name.as_str()) {
-                    return;
+            for (regex, message) in &entries {
+                if let Some(found) = regex.find(text) {
+                    diagnostics.push(report(ctx, start + found.start(), message.clone()));
                 }
-                let Some(JSXAttributeValue::StringLiteral(lit)) = &attr.value else {
-                    return;
-                };
-                let Some(rel) = super::first_dash_offset(lit.value.as_str()) else {
-                    return;
-                };
-                // `lit.span.start` is the opening quote; the value starts one
-                // byte after it.
-                self.report(ctx, lit.span.start as usize + 1 + rel, diagnostics);
             }
-            _ => {}
+        };
+        for node in semantic.nodes().iter() {
+            match node.kind() {
+                AstKind::JSXText(text) => {
+                    if !inside_technical_element(node.id(), semantic) {
+                        scan(text.span.start as usize, text.span.end as usize, true);
+                    }
+                }
+                // Under `all-strings` the attribute's value is visited as a `StringLiteral`.
+                AstKind::JSXAttribute(attr) if !all_strings => {
+                    let JSXAttributeName::Identifier(name) = &attr.name else {
+                        continue;
+                    };
+                    if let Some(JSXAttributeValue::StringLiteral(lit)) = &attr.value
+                        && super::COPY_ATTRS.contains(&name.name.as_str())
+                    {
+                        let (start, end) = unquoted(lit.span);
+                        scan(start, end, false);
+                    }
+                }
+                AstKind::StringLiteral(lit) if all_strings => {
+                    let (start, end) = unquoted(lit.span);
+                    scan(start, end, false);
+                }
+                AstKind::TemplateLiteral(template) if all_strings => {
+                    for quasi in &template.quasis {
+                        scan(quasi.span.start as usize, quasi.span.end as usize, false);
+                    }
+                }
+                _ => {}
+            }
         }
+        diagnostics
     }
 }
 
-impl Check {
-    fn report(&self, ctx: &CheckCtx, offset: usize, diagnostics: &mut Vec<Diagnostic>) {
-        let (line, column) = byte_offset_to_line_col(ctx.source, offset);
-        diagnostics.push(Diagnostic {
-            path: Arc::clone(&ctx.path_arc),
-            line,
-            column,
-            rule_id: super::META.id.into(),
-            message: "Em-dash/en-dash in user-facing JSX copy reads as AI-generated \
-                      prose \u{2014} use a plain hyphen or rewrite the sentence."
-                .into(),
-            severity: Severity::Error,
-            span: None,
-        });
+/// `characters` plus the named HTML entities rendering one.
+fn with_entities(characters: Vec<String>) -> Vec<String> {
+    let entities: Vec<String> = XML_ENTITIES
+        .entries()
+        .filter(|(_, glyph)| characters.iter().any(|c| c.chars().eq([**glyph])))
+        .map(|(name, _)| format!("&{name};"))
+        .collect();
+    characters.into_iter().chain(entities).collect()
+}
+
+fn compile_entry(index: usize, table: &toml::Table) -> (Regex, String) {
+    let at = format!("[rules.\"{}\"] entries[{index}]", super::META.id);
+    let entry: EntryToml = toml::Value::Table(table.clone())
+        .try_into()
+        .unwrap_or_else(|err| panic!("{at}: {err}"));
+    let regex = Regex::new(&entry.regex).unwrap_or_else(|err| panic!("{at}: {err}"));
+    (regex, entry.message)
+}
+
+fn unquoted(span: Span) -> (usize, usize) {
+    (span.start as usize + 1, span.end as usize - 1)
+}
+
+fn report(ctx: &CheckCtx, offset: usize, message: String) -> Diagnostic {
+    let (line, column) = byte_offset_to_line_col(ctx.source, offset);
+    Diagnostic {
+        path: Arc::clone(&ctx.path_arc),
+        line,
+        column,
+        rule_id: super::META.id.into(),
+        message,
+        severity: Severity::Error,
+        span: None,
     }
 }
 
@@ -117,6 +172,84 @@ mod tests {
 
     fn run(source: &str) -> Vec<Diagnostic> {
         crate::rules::test_helpers::run_rule(&Check, source, "Page.tsx")
+    }
+
+    /// Run the rule under `[rules.no-em-dash-in-jsx-text]` holding `rule_toml`.
+    fn run_configured(rule_toml: &str, source: &str) -> Vec<Diagnostic> {
+        let config_dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            config_dir.path().join("comply.toml"),
+            format!("[rules.no-em-dash-in-jsx-text]\n{rule_toml}\n"),
+        )
+        .expect("write cfg");
+        let config = crate::config::Config::load_from(config_dir.path()).expect("load cfg");
+        let path = std::path::Path::new("Page.tsx");
+        let allocator = oxc_allocator::Allocator::default();
+        let source_type = crate::oxc_helpers::source_type_for_path(path);
+        let parsed = oxc_parser::Parser::new(&allocator, source, source_type).parse();
+        let semantic = oxc_semantic::SemanticBuilder::new()
+            .build(&parsed.program)
+            .semantic;
+        let ctx = CheckCtx {
+            path,
+            path_arc: Arc::from(path),
+            source,
+            config: &config,
+            project: crate::project::default_static_project_ctx(),
+            file: crate::rules::file_ctx::default_static_file_ctx(),
+            lang: crate::files::Language::Tsx,
+        };
+        Check.run_on_semantic(&semantic, &ctx)
+    }
+
+    #[test]
+    fn configured_middle_dot_and_its_entity_are_flagged_in_jsx_text() {
+        let characters = "characters = [\"\u{2014}\", \"\u{00B7}\"]";
+        assert_eq!(run_configured(characters, "<p>a \u{00B7} b</p>").len(), 1);
+        assert_eq!(run_configured(characters, "<p>a &middot; b</p>").len(), 1);
+    }
+
+    #[test]
+    fn scope_decides_string_literal_and_template_piece() {
+        let characters = "characters = [\"\u{2014}\", \"\u{00B7}\"]";
+        let wide = format!("{characters}\nscope = \"all-strings\"");
+        let literal = "const s = \"a \u{00B7} b\";";
+        let template = "const t = `x \u{2014} ${y}`;";
+        assert_eq!(run_configured(&wide, literal).len(), 1);
+        assert_eq!(run_configured(&wide, template).len(), 1);
+        assert!(run_configured(characters, literal).is_empty());
+        assert!(run_configured(characters, template).is_empty());
+    }
+
+    #[test]
+    fn entry_regex_flags_rating_with_its_message() {
+        let entry = "[[rules.no-em-dash-in-jsx-text.entries]]\nregex = '(^|\\d|\\s)/\\s?5(\\D|$)'\nmessage = \"formatScore\"";
+        let hits = run_configured(entry, "<p>Note 4/5</p>");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message, "formatScore");
+        assert!(run_configured(entry, "<p>Note 4/50</p>").is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "entries[0]")]
+    fn invalid_entry_regex_panics_naming_the_entry() {
+        let entry =
+            "[[rules.no-em-dash-in-jsx-text.entries]]\nregex = \"(\"\nmessage = \"formatScore\"";
+        run_configured(entry, "<p>Note 4/5</p>");
+    }
+
+    #[test]
+    fn all_strings_reports_copy_attribute_once() {
+        let wide = "scope = \"all-strings\"";
+        assert_eq!(
+            run_configured(wide, "<img alt=\"A \u{2014} B\" />").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn default_characters_count_their_entity() {
+        assert_eq!(run("<p>a &mdash; b</p>").len(), 1);
     }
 
     #[test]

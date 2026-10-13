@@ -1,15 +1,6 @@
-//! no-em-dash-in-jsx-text — flag em-dash (U+2014) and en-dash (U+2013) in
-//! user-facing JSX copy.
-//!
-//! Em-dashes and en-dashes in rendered copy read as AI-generated prose; the
-//! anti-slop family (`banned-comment-*`) flags the same tell in comments, this
-//! one flags it in the text users actually see. It inspects `JSXText` node
-//! content and the string-literal values of copy-bearing JSX attributes
-//! (`title`, `label`, `placeholder`, `alt`, `aria-label`) only — never code,
-//! never arbitrary expressions, never non-copy attributes. A dash flanked by
-//! two digits (numeric range like `9–5`), any dash inside `<code>` / `<pre>`
-//! children, and a JSXText node whose entire trimmed content is a single dash
-//! (an empty-value placeholder glyph like `<span>—</span>`) are left alone.
+//! Flags forbidden characters and patterns in user-facing copy.
+//! `scope = "jsx-copy"` reads JSX text and copy attributes.
+//! `"all-strings"` reads every string literal and template piece.
 
 mod oxc_typescript;
 
@@ -36,33 +27,27 @@ pub const META: RuleMeta = RuleMeta {
 /// Anything outside this set (`className`, `id`, data-*, …) is code, not copy.
 const COPY_ATTRS: &[&str] = &["title", "label", "placeholder", "alt", "aria-label"];
 
-/// The dashes we flag: em-dash (U+2014) and en-dash (U+2013).
-const DASHES: [char; 2] = ['\u{2014}', '\u{2013}'];
-
-/// Return the byte offset of the first flagged dash in `text`, or `None`.
-///
-/// A dash directly between two ASCII digits (e.g. `9\u{2013}5`, `2020\u{2013}2024`)
-/// is a numeric range, not prose, and is skipped.
-pub(crate) fn first_dash_offset(text: &str) -> Option<usize> {
+/// First flagged needle in `text`, with its byte offset.
+/// A needle between two digits (`9–5`) is a range, skipped.
+pub(crate) fn first_needle_offset<'n>(
+    needles: &'n [String],
+    text: &str,
+) -> Option<(usize, &'n str)> {
     let bytes = text.as_bytes();
-    for (offset, ch) in text.char_indices() {
-        if !DASHES.contains(&ch) {
-            continue;
-        }
-        if is_numeric_range(bytes, offset, ch.len_utf8()) {
-            continue;
-        }
-        return Some(offset);
-    }
-    None
+    text.char_indices().find_map(|(offset, _)| {
+        needles
+            .iter()
+            .find(|needle| {
+                text[offset..].starts_with(needle.as_str())
+                    && !is_numeric_range(bytes, offset, needle.len())
+            })
+            .map(|needle| (offset, needle.as_str()))
+    })
 }
 
-/// True when `text` trims down to exactly one flagged dash. Such a node is an
-/// empty-value placeholder glyph (`<span>—</span>`, `<td>–</td>`), not sentence
-/// punctuation, so the rule's "rephrase the sentence" remedy has nothing to act on.
-pub(crate) fn is_standalone_dash(text: &str) -> bool {
-    let mut chars = text.trim().chars();
-    chars.next().is_some_and(|ch| DASHES.contains(&ch)) && chars.next().is_none()
+/// True when `text` trims to one needle: a placeholder glyph.
+pub(crate) fn is_standalone_needle(needles: &[String], text: &str) -> bool {
+    needles.iter().any(|needle| text.trim() == needle)
 }
 
 /// True when the dash at `offset` (spanning `dash_len` bytes) has an ASCII digit
@@ -95,61 +80,65 @@ pub fn register() -> RuleDef {
 mod tests {
     use super::*;
 
+    fn dashes() -> Vec<String> {
+        vec!["\u{2014}".into(), "\u{2013}".into()]
+    }
+
     #[test]
     fn finds_em_dash() {
-        assert!(first_dash_offset("Save time \u{2014} automate.").is_some());
+        assert!(first_needle_offset(&dashes(), "Save time \u{2014} automate.").is_some());
     }
 
     #[test]
     fn finds_en_dash() {
-        assert!(first_dash_offset("First \u{2013} last").is_some());
+        assert!(first_needle_offset(&dashes(), "First \u{2013} last").is_some());
     }
 
     #[test]
     fn ignores_plain_hyphen() {
-        assert!(first_dash_offset("Save time - automate.").is_none());
+        assert!(first_needle_offset(&dashes(), "Save time - automate.").is_none());
     }
 
     #[test]
     fn skips_numeric_range_en_dash() {
-        assert!(first_dash_offset("9\u{2013}5").is_none());
-        assert!(first_dash_offset("2020\u{2013}2024").is_none());
+        assert!(first_needle_offset(&dashes(), "9\u{2013}5").is_none());
+        assert!(first_needle_offset(&dashes(), "2020\u{2013}2024").is_none());
     }
 
     #[test]
     fn skips_numeric_range_em_dash() {
-        assert!(first_dash_offset("9\u{2014}5").is_none());
+        assert!(first_needle_offset(&dashes(), "9\u{2014}5").is_none());
     }
 
     #[test]
     fn flags_dash_when_only_one_side_is_a_digit() {
         // "page 9 — see note" is prose, not a range.
-        assert!(first_dash_offset("9 \u{2014} note").is_some());
-        assert!(first_dash_offset("note \u{2014} 9").is_some());
+        assert!(first_needle_offset(&dashes(), "9 \u{2014} note").is_some());
+        assert!(first_needle_offset(&dashes(), "note \u{2014} 9").is_some());
     }
 
     #[test]
     fn offset_lands_on_the_dash() {
         let text = "ab\u{2014}cd";
-        let off = first_dash_offset(text).unwrap();
+        let (off, _) = first_needle_offset(&dashes(), text).unwrap();
         assert_eq!(&text[off..off + 3], "\u{2014}");
     }
 
     #[test]
     fn standalone_dash_is_a_placeholder() {
-        assert!(is_standalone_dash("\u{2014}"));
-        assert!(is_standalone_dash("\u{2013}"));
+        assert!(is_standalone_needle(&dashes(), "\u{2014}"));
+        assert!(is_standalone_needle(&dashes(), "\u{2013}"));
         // JSXText carries surrounding whitespace from formatting.
-        assert!(is_standalone_dash("  \u{2014}  "));
-        assert!(is_standalone_dash("\n  \u{2013}\n"));
+        assert!(is_standalone_needle(&dashes(), "  \u{2014}  "));
+        assert!(is_standalone_needle(&dashes(), "\n  \u{2013}\n"));
     }
 
     #[test]
     fn dash_with_prose_is_not_standalone() {
-        assert!(!is_standalone_dash("\u{2014} Foo"));
-        assert!(!is_standalone_dash("Foo \u{2014} bar"));
-        assert!(!is_standalone_dash("\u{2014}\u{2014}"));
-        assert!(!is_standalone_dash("-"));
-        assert!(!is_standalone_dash(""));
+        assert!(!is_standalone_needle(&dashes(), "\u{2014} Foo"));
+        assert!(!is_standalone_needle(&dashes(), "Foo \u{2014} bar"));
+        assert!(!is_standalone_needle(&dashes(), "\u{2014}\u{2014}"));
+        assert!(!is_standalone_needle(&dashes(), "-"));
+        assert!(!is_standalone_needle(&dashes(), ""));
     }
 }
