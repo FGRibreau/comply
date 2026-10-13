@@ -454,6 +454,25 @@ max_letter_spacing_em = 0.05
 classes = []
 entries = []
 
+# JSX element policy, empty by default. Each entry sets one selector (`tag`
+# or `element`) and one action; every other key is optional:
+#   [[rules.jsx-restricted-elements.entries]]
+#   tag = "^input$"                  # regex on an intrinsic element name
+#   element = "Button"               # exact component name, instead of `tag`
+#   when_attr = { type = ["text"] }  # attribute set to one of these literals
+#   unless_attr = ["hidden"]         # any of these attributes, or a spread
+#   when_class = "^rounded-card$"    # regex on an unconditional class
+#   unless_class = ["sr-only"]       # any of these utilities, or a spread
+#   when_text = "^Copy\\b"           # regex on the direct text, trimmed
+#   use = "Input"                    # action: the replacement element
+#   forbid_attr = "title"            # action: attribute not allowed
+#   require_attr = "isLoading"       # action: attribute required
+#   forbid_class = "^underline$"     # action: class regex not allowed
+#   forbid_nested = true             # action: no match inside a match
+#   message = "Use the design-system Input."
+[rules.jsx-restricted-elements]
+entries = []
+
 # Opt-in required-scripts check for package.json. Empty by default — the rule
 # is a no-op until a project lists the npm scripts it expects every package to
 # define, e.g.:

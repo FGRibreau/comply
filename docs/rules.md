@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2058 rules across 152 categories.
+2059 rules across 152 categories.
 
 ## Categories
 
@@ -94,7 +94,7 @@
 - [promise](#promise) (6 rules)
 - [qwik](#qwik) (1 rules)
 - [qwik > correctness](#qwik-correctness) (2 rules)
-- [react](#react) (126 rules)
+- [react](#react) (127 rules)
 - [react > code-quality](#react-code-quality) (4 rules)
 - [react > imports](#react-imports) (1 rules)
 - [react > performance](#react-performance) (3 rules)
@@ -1630,6 +1630,7 @@
 | `jsx-no-leaked-render` | Numeric value used with `&&` in JSX renders `0` instead of nothing. | Convert to boolean: `{!!count && <Component />}` or use a ternary: `{count > 0 ? <Component /> : null}`. |
 | `jsx-no-new-function-as-prop` | Arrow/function expressions as JSX prop values create a new reference every render. | Hoist the handler with `useCallback` or to a stable identifier defined outside the render. |
 | `jsx-no-undef` | JSX component tag refers to an undefined identifier. | Import the component or declare it in this file before using it in JSX. |
+| `jsx-restricted-elements` | User-configured policy over JSX elements: a selector (`tag` regex or `element` name, narrowed by attribute, class and text conditions) and one action (`use` a replacement, `forbid_attr`, `require_attr`, `forbid_class`, `forbid_nested`), each with its own message. | Use the element, attribute or class the project policy names in the message. |
 | `no-em-dash-in-jsx-text` | Em-dash/en-dash in user-facing JSX copy reads as AI-generated prose. | Replace the em-dash (—) or en-dash (–) with a plain hyphen, or rewrite the sentence to drop the dash. |
 | `no-hook-setter-in-body` | `useState` setter called directly in component body causes infinite re-renders. | Move the setter call inside `useEffect`, `useCallback`, or an event handler. |
 | `no-react-specific-props` | React-specific JSX prop used in a non-React framework. | Replace the React-specific prop with its DOM-native form (`className` → `class`, `htmlFor` → `for`). |
