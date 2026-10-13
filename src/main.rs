@@ -715,14 +715,20 @@ fn lint_project(cli: &Cli) -> Result<bool> {
     let after_overrides = apply_config_filters(diagnostics, &config);
     let mut after_suppressions =
         ignore_comments::apply_to_all(after_overrides, &discovered, &clean_files);
+    // Paths stay as discovered unless `--diff-only` makes them repo-relative.
+    let mut paths_root = std::path::PathBuf::new();
     if cli.diff_only {
         let changed = changed_lines::changed_lines(&mode)?;
-        let repo_root = changed_lines::git_repo_root().unwrap_or_default();
+        paths_root = changed_lines::git_repo_root().unwrap_or(paths_root);
         for diag in &mut after_suppressions {
-            let normalised = changed_lines::normalise_path(diag.path.as_ref(), &repo_root);
+            let normalised = changed_lines::normalise_path(diag.path.as_ref(), &paths_root);
             diag.path = std::sync::Arc::from(normalised);
         }
         changed_lines::retain_in_diff(&mut after_suppressions, &changed);
+    }
+    if cli.fix {
+        let rewritten = fix::rewrite_copy(&mut after_suppressions, &paths_root);
+        eprintln!("comply: rewrote {rewritten} copy finding(s)");
     }
     timings.post = t_post.elapsed();
 

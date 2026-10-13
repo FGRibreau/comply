@@ -370,6 +370,152 @@ fn missing_type_aware_toolchain_is_an_instruction_not_a_crash_issue_8109() {
         .stderr(predicate::str::contains("github.com/rbaumier/comply/issues").not());
 }
 
+/// Enables the two opt-in French copy rules.
+const COPY_RULES_TOML: &str = "[rules.french-nbsp-before-punctuation]\ndisabled = false\n\
+    [rules.copy-apostrophe-style]\ndisabled = false\n";
+
+#[test]
+fn fix_rewrites_each_copy_finding_in_its_context_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    fs::write(
+        root.join("Page.tsx"),
+        "export function Page() { return <p aria-label=\"Quoi ?\">\
+         Attention : l'agent a\u{200b}b</p>; }\nexport const s = \"a\u{a0}b\";\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib.rs"), "pub const S: &str = \"a\u{a0}b\";\n").unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains(
+            "comply: rewrote 6 copy finding(s)",
+        ));
+    let page = fs::read_to_string(root.join("Page.tsx")).unwrap();
+    let lib = fs::read_to_string(root.join("lib.rs")).unwrap();
+    for fixed in [
+        "aria-label=\"Quoi&#8239;?\"",
+        "Attention&nbsp;: l’agent a&#x200B;b",
+        "\"a\\u00A0b\"",
+    ] {
+        assert!(page.contains(fixed), "{fixed} missing from {page}");
+    }
+    assert!(lib.contains("\"a\\u{a0}b\""), "{lib}");
+
+    common::comply().arg(root).assert().stdout(
+        predicate::str::contains("french-nbsp-before-punctuation")
+            .or(predicate::str::contains("no-raw-invisible-character"))
+            .or(predicate::str::contains("copy-apostrophe-style"))
+            .not(),
+    );
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains(
+            "comply: rewrote 0 copy finding(s)",
+        ));
+    assert_eq!(fs::read_to_string(root.join("Page.tsx")).unwrap(), page);
+    assert_eq!(fs::read_to_string(root.join("lib.rs")).unwrap(), lib);
+}
+
+#[test]
+fn staged_diff_only_fix_leaves_unchanged_lines_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    fs::create_dir(root.join("web")).unwrap();
+    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    fs::write(
+        root.join("web/Page.tsx"),
+        "export const A = <p>Avant : ok</p>;\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+
+    fs::write(
+        root.join("web/Page.tsx"),
+        "export const A = <p>Avant : ok</p>;\nexport const B = <p>Après : ok</p>;\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+
+    common::comply()
+        .current_dir(root)
+        .args(["--staged", "--diff-only", "--fix"])
+        .assert()
+        .stderr(predicate::str::contains(
+            "comply: rewrote 1 copy finding(s)",
+        ));
+    let page = fs::read_to_string(root.join("web/Page.tsx")).unwrap();
+    assert!(page.contains("Avant : ok"), "{page}");
+    assert!(page.contains("Après&nbsp;: ok"), "{page}");
+}
+
+#[test]
+fn fix_leaves_raw_literal_invisible_reported_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let rs = "pub const S: &str = r\"a\u{200b}b\";\n";
+    let ts = "export const t = String.raw`a\u{200b}b`;\n";
+    fs::write(root.join("lib.rs"), rs).unwrap();
+    fs::write(root.join("a.ts"), ts).unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stdout(predicate::str::contains("no-raw-invisible-character"));
+    assert_eq!(fs::read_to_string(root.join("lib.rs")).unwrap(), rs);
+    assert_eq!(fs::read_to_string(root.join("a.ts")).unwrap(), ts);
+}
+
+#[test]
+fn fix_still_runs_oxlint_fixers_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("a.ts"),
+        "export function f() { debugger; return 1; }\n",
+    )
+    .unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains("comply: ran 1 fixer(s)"));
+    let ts = fs::read_to_string(root.join("a.ts")).unwrap();
+    assert!(!ts.contains("debugger"), "{ts}");
+}
+
+#[test]
+fn fix_leaves_file_whose_fix_breaks_parse_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("comply.toml"),
+        "[rules.copy-apostrophe-style]\ndisabled = false\nstyle = \"straight\"\n",
+    )
+    .unwrap();
+    let tsx = "export const P = () => <i title='l’agent' />;\n";
+    fs::write(root.join("Page.tsx"), tsx).unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains("Page.tsx"))
+        .stdout(predicate::str::contains("copy-apostrophe-style"));
+    assert_eq!(fs::read_to_string(root.join("Page.tsx")).unwrap(), tsx);
+}
+
 #[test]
 fn ansi_fixture_does_not_cost_its_batch_its_diagnostics_issue_8402() {
     // oxlint's json writer echoes source text into `message` unescaped, so a
