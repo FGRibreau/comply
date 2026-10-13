@@ -57,6 +57,23 @@ struct Occurrence {
 // (reporter_fi, reporter_tok_start, reporter_line, canonical_fi, canonical_tok_start, canonical_line)
 type RawClone = (usize, usize, usize, usize, usize, usize);
 
+/// Catalog entry only; `main.rs` runs the detector itself.
+pub fn register() -> crate::rules::RuleDef {
+    crate::rules::RuleDef {
+        meta: crate::rules::meta::RuleMeta {
+            id: RULE_ID,
+            description: "A block of 100 or more tokens must not be duplicated across files.",
+            remediation: "Extract the duplicated block into a shared function or module.",
+            severity: Severity::Error,
+            doc_url: None,
+            categories: &["code-quality"],
+            skip_in_test_dir: false,
+            skip_in_relaxed_dir: false,
+        },
+        backends: vec![],
+    }
+}
+
 #[must_use]
 pub fn lint_files(files: &[&SourceFile]) -> Vec<Diagnostic> {
     // Sample/example/docs/fixture/bench directories hold intentionally

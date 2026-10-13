@@ -128,3 +128,24 @@ fn output_format_matches_eslint_pattern() {
         .assert()
         .stdout(predicate::str::is_match(r":\d+:\d+: (error|warning) \[").unwrap());
 }
+
+#[test]
+fn explain_and_list_know_the_cross_file_rules_issue_8611() {
+    let ids = [
+        "no-duplicate-function",
+        "no-clones",
+        "no-duplicate-comments",
+    ];
+    for id in ids {
+        common::comply()
+            .args(["explain", id])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(id));
+    }
+    let listed = common::comply().arg("list").assert().success();
+    let stdout = String::from_utf8_lossy(&listed.get_output().stdout);
+    for id in ids {
+        assert!(stdout.contains(id), "`comply list` omits {id}");
+    }
+}

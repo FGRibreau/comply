@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2061 rules across 152 categories.
 
 ## Categories
 
@@ -22,7 +22,7 @@
 - [better-result](#better-result) (20 rules)
 - [bundle-size](#bundle-size) (3 rules)
 - [ci-cd](#ci-cd) (9 rules)
-- [code-quality](#code-quality) (258 rules)
+- [code-quality](#code-quality) (261 rules)
 - [code-quality > imports](#code-quality-imports) (4 rules)
 - [code-quality > regex](#code-quality-regex) (17 rules)
 - [comments](#comments) (7 rules)
@@ -447,6 +447,7 @@
 | `no-boolean-flag-param` | Boolean flag parameters hide two behaviors behind one signature. | Split into two named functions. `sendNotification(msg, isUrgent)` → `sendUrgentNotification(msg)` + `sendNormalNotification(msg)`. A ternary or options object is not a fix — the boolean must disappear from the signature. |
 | `no-built-in-override` | Overriding built-in globals like `Array`, `Object`, `Promise` shadows critical APIs. | Rename the variable. Overriding built-in globals breaks standard library behaviour and causes subtle bugs downstream. |
 | `no-case-label-in-switch` | Label statement inside switch looks like a case but is a JS label. | Use `case <value>:` instead. A bare `identifier:` inside a switch is a label statement, not a case branch. |
+| `no-clones` | A block of 100 or more tokens must not be duplicated across files. | Extract the duplicated block into a shared function or module. |
 | `no-collapsible-if` | Nested `if` can be merged with `&&`. | Merge `if (a) { if (b) { ... } }` into `if (a && b) { ... }`. Unnecessary nesting wastes indent levels. |
 | `no-collection-size-mischeck` | `.length >= 0` is always true; `.length < 0` is always false. | Use `.length > 0` to check non-empty, or `.length === 0` to check empty. |
 | `no-common-grab-bag` | A `common`/`utils`/`helpers`/`shared`/`misc`/`util` module holding a large exported surface names none of what it owns. | Split the module along the concerns it accumulated and name each part after what that part owns. |
@@ -454,6 +455,8 @@
 | `no-constructor-side-effects` | `new X()` without assignment is a side-effect anti-pattern. | Assign the result of `new X()` to a variable, or refactor side effects out of the constructor into a static method. |
 | `no-deprecated-api` | Usage of deprecated Node.js or browser API. | Replace with the modern equivalent: `Buffer.from()` instead of `new Buffer()`, `url.URL` instead of `url.parse()`, etc. |
 | `no-document-cookie` | Do not use `document.cookie` directly. | Use a cookie library (e.g. `js-cookie`, `cookie`) instead of raw `document.cookie` access. Direct cookie manipulation is error-prone and hard to maintain. |
+| `no-duplicate-comments` | A comment must not copy the opening of a comment in another place. | Lift the shared rationale into an ADR or canonical doc the comments cite. |
+| `no-duplicate-function` | A named function must not be copy-pasted verbatim into another file. | Extract the function into a shared module and import it from both call sites. |
 | `no-duplicate-string` | String literal appears 3+ times — extract to a constant. | Extract the repeated string into a named constant and reference it everywhere. Reduces typo risk and makes future changes a single-line edit. |
 | `no-duplicated-branches` | Two branches of an if/else have identical bodies. | Merge the conditions or remove the duplicate branch. |
 | `no-element-overwrite` | A collection element is written and immediately overwritten on the next line. | Remove the first assignment or use a different key/index. |

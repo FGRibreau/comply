@@ -121,10 +121,10 @@ mod tests {
     fn rules_subcommand_recognizes_all_rule_families() {
         // A real engine rule — whichever the registry lists first.
         assert!(is_known_rule_id(rules::all_rule_defs()[0].meta.id));
-        // In-process cross-file detectors (absent from `all_rule_defs`).
+        // In-process cross-file detectors.
         assert!(is_known_rule_id(clone_detection::RULE_ID));
         assert!(is_known_rule_id(comment_duplicate_detection::RULE_ID));
-        // Cargo subprocess detectors (also absent from `all_rule_defs`).
+        // Cargo subprocess detectors (absent from `all_rule_defs`).
         assert!(is_known_rule_id(cargo_modules::RULE_ID));
         assert!(is_known_rule_id(cargo_shear::RULE_ID));
         // Unknown IDs are still rejected so the subcommand keeps erroring on typos.
@@ -489,16 +489,7 @@ fn print_timings(t: &Timings) {
     eprintln!("  TOTAL         {}", fmt_ms(t.total));
 }
 
-/// Cross-file detectors that run in-process outside the rule engine, so they
-/// are absent from `all_rule_defs()`. `comply rules` dispatches these directly
-/// when their ID is requested.
-const CROSS_FILE_RULE_IDS: &[&str] = &[
-    clone_detection::RULE_ID,
-    comment_duplicate_detection::RULE_ID,
-    function_duplicate_detection::RULE_ID,
-];
-
-/// Cargo-backed subprocess detectors, also absent from `all_rule_defs()`.
+/// Cargo-backed subprocess detectors, absent from `all_rule_defs()`.
 /// Producing them requires shelling out to cargo, so a `comply rules` filter
 /// naming one routes through the full `collect_all_diagnostics` pipeline.
 const CARGO_SUBPROCESS_RULE_IDS: &[&str] = &[cargo_modules::RULE_ID, cargo_shear::RULE_ID];
@@ -507,7 +498,6 @@ const CARGO_SUBPROCESS_RULE_IDS: &[&str] = &[cargo_modules::RULE_ID, cargo_shear
 /// cross-file detector, or a subprocess-backed rule.
 pub(crate) fn is_known_rule_id(id: &str) -> bool {
     rules::all_rule_defs().iter().any(|r| r.meta.id == id)
-        || CROSS_FILE_RULE_IDS.contains(&id)
         || CARGO_SUBPROCESS_RULE_IDS.contains(&id)
 }
 
@@ -583,10 +573,10 @@ fn run_cross_file_rules(
             out.extend(clone_detection::lint_files(files));
         }
         if wants(comment_duplicate_detection::RULE_ID) {
-            out.extend(comment_duplicate_detection::lint_files(files, config));
+            out.extend(comment_duplicate_detection::lint_files(files, &[], config));
         }
         if wants(function_duplicate_detection::RULE_ID) {
-            out.extend(function_duplicate_detection::lint_files(files, config));
+            out.extend(function_duplicate_detection::lint_files(files, &[], config));
         }
     }
     out
@@ -842,11 +832,28 @@ fn collect_all_diagnostics(
         Vec::new()
     };
 
+    let linted: Vec<std::path::PathBuf> = if is_partial {
+        discovered
+            .iter()
+            .filter_map(|f| std::fs::canonicalize(&f.path).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Unscanned project files: cross-file rules compare scanned code against them.
+    let linted_set: FxHashSet<&std::path::Path> = linted.iter().map(|p| p.as_path()).collect();
+    let reference: Vec<&SourceFile> = full_project_files
+        .iter()
+        .filter(|f| {
+            std::fs::canonicalize(&f.path).map_or(true, |p| !linted_set.contains(p.as_path()))
+        })
+        .collect();
+
     let clones_enabled =
-        discovered.len() >= 2 && !config.is_rule_globally_disabled(clone_detection::RULE_ID);
-    let dup_comments_enabled = discovered.len() >= 2
+        index_refs.len() >= 2 && !config.is_rule_globally_disabled(clone_detection::RULE_ID);
+    let dup_comments_enabled = index_refs.len() >= 2
         && !config.is_rule_globally_disabled(comment_duplicate_detection::RULE_ID);
-    let func_dups_enabled = discovered.len() >= 2
+    let func_dups_enabled = index_refs.len() >= 2
         && !config.is_rule_globally_disabled(function_duplicate_detection::RULE_ID);
 
     // Clone detection only needs the file list, not the import index, so its
@@ -861,11 +868,7 @@ fn collect_all_diagnostics(
             std::sync::Arc::new(crate::project::ProjectCtx::load(&index_refs, config));
 
         if is_partial {
-            let linted: Vec<std::path::PathBuf> = discovered
-                .iter()
-                .filter_map(|f| std::fs::canonicalize(&f.path).ok())
-                .collect();
-            project.set_linted_paths(linted);
+            project.set_linted_paths(linted.clone());
         }
 
         let mut diags = Vec::with_capacity(discovered.len());
@@ -918,7 +921,8 @@ fn collect_all_diagnostics(
             return (Vec::new(), std::time::Duration::ZERO);
         }
         let t = Instant::now();
-        let all_refs: Vec<&SourceFile> = discovered.iter().collect();
+        // The first file seen is canonical, so references go first.
+        let all_refs: Vec<&SourceFile> = reference.iter().copied().chain(discovered).collect();
         let d = clone_detection::lint_files(&all_refs);
         (d, t.elapsed())
     };
@@ -927,14 +931,14 @@ fn collect_all_diagnostics(
             return Vec::new();
         }
         let all_refs: Vec<&SourceFile> = discovered.iter().collect();
-        comment_duplicate_detection::lint_files(&all_refs, config)
+        comment_duplicate_detection::lint_files(&all_refs, &reference, config)
     };
     let func_dups_work = || -> Vec<Diagnostic> {
         if !func_dups_enabled {
             return Vec::new();
         }
         let all_refs: Vec<&SourceFile> = discovered.iter().collect();
-        function_duplicate_detection::lint_files(&all_refs, config)
+        function_duplicate_detection::lint_files(&all_refs, &reference, config)
     };
 
     let (engine_res, ((clone_diags, clones_elapsed), (dup_diags, func_dup_diags))) =
@@ -943,9 +947,15 @@ fn collect_all_diagnostics(
         });
     let (project, engine_diags) = engine_res?;
     diagnostics.extend(engine_diags);
-    diagnostics.extend(clone_diags);
-    diagnostics.extend(dup_diags);
-    diagnostics.extend(func_dup_diags);
+    let scanned: FxHashSet<&std::path::Path> =
+        discovered.iter().map(|f| f.path.as_path()).collect();
+    diagnostics.extend(
+        clone_diags
+            .into_iter()
+            .chain(dup_diags)
+            .chain(func_dup_diags)
+            .filter(|d| scanned.contains(&*d.path)),
+    );
     timings.clones = clones_elapsed;
 
     if project.has_framework("drizzle") {
