@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2058 rules across 152 categories.
+2059 rules across 152 categories.
 
 ## Categories
 
@@ -22,7 +22,7 @@
 - [better-result](#better-result) (20 rules)
 - [bundle-size](#bundle-size) (3 rules)
 - [ci-cd](#ci-cd) (9 rules)
-- [code-quality](#code-quality) (258 rules)
+- [code-quality](#code-quality) (259 rules)
 - [code-quality > imports](#code-quality-imports) (4 rules)
 - [code-quality > regex](#code-quality-regex) (17 rules)
 - [comments](#comments) (7 rules)
@@ -509,6 +509,7 @@
 | `no-redundant-clsx` | `clsx()` / `cn()` called with a single static string is redundant. | Remove clsx/cn wrapper when using single static string |
 | `no-redundant-jump` | Redundant `return;` at end of function or `continue;` at end of loop body. | Remove the redundant `return;` or `continue;` — execution already falls through naturally. |
 | `no-redundant-null-undefined-check` | Comparing the same operand against both `null` and `undefined` is a verbose nullish check. | Collapse `x !== null && x !== undefined` (or the `x === null \|\| x === undefined` mirror) into a single strict, type-narrowing guard — not the loose `x != null`, which fights projects that ban `==`/`!=`. Define once: `function isDefined<T>(v: T): v is NonNullable<T> { return v !== null && v !== undefined; }`, then use `isDefined(x)` / `!isDefined(x)`. It narrows to `NonNullable<T>` (e.g. `arr.filter(isDefined)`). No autofix — the helper's name and location are project-specific. |
+| `no-restricted-object-keys` | User-configured keys forbidden in an object literal passed under a named property or JSX prop. | Follow the entry's message: use the project-approved token or move the value out of this object. |
 | `no-shallow-passthrough-method` | Method body only forwards arguments to another method with the same signature. | Inline the call at each call-site or add real behaviour — a pure pass-through adds a layer with no value. |
 | `no-side-effects-in-initialization` | Top-level side effects (bare calls, `new`, IIFE) at module scope prevent tree-shaking. | Avoid side effects at module top-level for tree-shaking |
 | `no-single-promise-in-promise-methods` | Wrapping a single-element array with `Promise.all/any/race()` is unnecessary. | Use the value directly instead of wrapping it in a Promise method: `await single` instead of `await Promise.all([single])`. |
