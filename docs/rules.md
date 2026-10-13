@@ -2627,7 +2627,7 @@
 | `ts-no-non-null-assertion` | Non-null assertions (`value!`) suppress compiler checks and can hide real nullability bugs. | Narrow the type with a check (`if (value)`), use optional chaining (`value?.x`), or rework the types so the value is known to be non-null. |
 | `ts-no-object-keys-typed-loop` | `Object.keys(obj).forEach(k => obj[k])` is type-unsound — TS widens to `any`. | Use `for (const [k, v] of Object.entries(obj))`, or cast: `(Object.keys(obj) as Array<keyof typeof obj>).forEach(...)`. |
 | `ts-no-redeclare` | Redeclaring a variable in the same scope shadows the previous declaration silently. | Remove the duplicate declaration or rename the variable. |
-| `ts-no-restricted-imports` | Disallow imports whose module specifier matches a configured pattern list. | Replace the restricted import with the recommended alternative, or remove the pattern from `[rules.ts-no-restricted-imports] patterns` in `comply.toml`. |
+| `ts-no-restricted-imports` | Disallow imports, re-exports and literal `import()` whose specifier or resolved project path matches a configured pattern or entry. | Replace the restricted import with the recommended alternative, or remove the pattern from `[rules.ts-no-restricted-imports] patterns` or `entries` in `comply.toml`. |
 | `ts-no-restricted-types` | Certain types are banned by project convention or because better alternatives exist. | Replace the restricted type with the recommended alternative. |
 | `ts-no-shadow` | Variable shadowing makes code harder to reason about and can lead to bugs. | Rename the inner variable to avoid shadowing the outer one. |
 | `ts-no-this-alias` | Assigning `this` to a variable is a legacy pattern — use arrow functions instead. | Use an arrow function to capture `this` lexically. |

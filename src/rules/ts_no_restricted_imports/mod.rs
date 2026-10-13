@@ -1,14 +1,6 @@
-//! ts-no-restricted-imports — disallow imports whose module specifier
-//! matches a user-configured pattern list.
+//! ts-no-restricted-imports — ban imports matching configured patterns.
 //!
-//! Opt-in via `comply.toml`:
-//!
-//! ```toml
-//! [rules.ts-no-restricted-imports]
-//! patterns = ["@banned/*", "lodash"]
-//! ```
-//!
-//! Absent or empty list → rule is a no-op.
+//! Keys `patterns` and `entries` are documented in `defaults.toml`.
 
 mod oxc_typescript;
 
@@ -20,8 +12,8 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "ts-no-restricted-imports",
-    description: "Disallow imports whose module specifier matches a configured pattern list.",
-    remediation: "Replace the restricted import with the recommended alternative, or remove the pattern from `[rules.ts-no-restricted-imports] patterns` in `comply.toml`.",
+    description: "Disallow imports, re-exports and literal `import()` whose specifier or resolved project path matches a configured pattern or entry.",
+    remediation: "Replace the restricted import with the recommended alternative, or remove the pattern from `[rules.ts-no-restricted-imports] patterns` or `entries` in `comply.toml`.",
     severity: Severity::Error,
     doc_url: Some("https://typescript-eslint.io/rules/no-restricted-imports"),
     categories: &["typescript"],
