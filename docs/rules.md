@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2058 rules across 152 categories.
 
 ## Categories
 
