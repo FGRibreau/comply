@@ -456,7 +456,7 @@
 | `no-deprecated-api` | Usage of deprecated Node.js or browser API. | Replace with the modern equivalent: `Buffer.from()` instead of `new Buffer()`, `url.URL` instead of `url.parse()`, etc. |
 | `no-document-cookie` | Do not use `document.cookie` directly. | Use a cookie library (e.g. `js-cookie`, `cookie`) instead of raw `document.cookie` access. Direct cookie manipulation is error-prone and hard to maintain. |
 | `no-duplicate-comments` | A comment must not copy the opening of a comment in another place. | Lift the shared rationale into an ADR or canonical doc the comments cite. |
-| `no-duplicate-function` | A named function must not be copy-pasted verbatim into another file. | Extract the function into a shared module and import it from both call sites. |
+| `no-duplicate-function` | A named function must not be copied into another file, verbatim or with renamed parameters, locals or name. | Extract the function into a shared module and import it from both call sites. |
 | `no-duplicate-string` | String literal appears 3+ times — extract to a constant. | Extract the repeated string into a named constant and reference it everywhere. Reduces typo risk and makes future changes a single-line edit. |
 | `no-duplicated-branches` | Two branches of an if/else have identical bodies. | Merge the conditions or remove the duplicate branch. |
 | `no-element-overwrite` | A collection element is written and immediately overwritten on the next line. | Remove the first assignment or use a different key/index. |
