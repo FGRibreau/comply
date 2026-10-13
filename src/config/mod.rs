@@ -60,6 +60,8 @@ pub struct Config {
     /// `[rules."id-length.ts"]` or `[rules."id-length.{ts,rs}"]`.
     /// Keyed by `base_rule_id -> Language -> key -> value`.
     lang_config: LangConfigMap,
+    /// Directory of the loaded `comply.toml`, `None` on defaults.
+    dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -85,7 +87,15 @@ impl Config {
         let user: ComplyToml = toml::from_str(&user_text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         let merged = merge(defaults::build_default_config(), user);
-        Self::from_raw(merged)
+        let mut config = Self::from_raw(merged)?;
+        config.dir = path.parent().map(Path::to_path_buf);
+        Ok(config)
+    }
+
+    /// Directory of the loaded `comply.toml`; it anchors config paths.
+    #[must_use]
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
     }
 
     /// Return the embedded `defaults.toml` verbatim — used by
@@ -333,6 +343,17 @@ impl Config {
         tables
     }
 
+    /// Read `[rules.<rule_id>.<key>]` as a keyed table.
+    /// Panics unless the key holds a table.
+    #[must_use]
+    pub fn table(&self, rule_id: &str, key: &str, lang: Language) -> &toml::Table {
+        let configured = self.extra_value(rule_id, key, lang);
+        let Some(table) = configured.as_table() else {
+            panic!("config key `[rules.\"{rule_id}\"] {key}` must be a table, got {configured:?}");
+        };
+        table
+    }
+
     fn from_raw(mut raw: ComplyToml) -> Result<Self> {
         let mut builder = GlobSetBuilder::new();
         let mut disable_lists: Vec<Vec<String>> = Vec::new();
@@ -357,6 +378,7 @@ impl Config {
             glob_matcher,
             disable_lists,
             lang_config,
+            dir: None,
         })
     }
 }
@@ -620,6 +642,34 @@ mod tests {
         .unwrap();
         let cfg = Config::load_from(project_dir.path()).unwrap();
         let _ = cfg.table_list("x", "entries", Language::TypeScript);
+    }
+
+    #[test]
+    fn table_reads_keyed_entries() {
+        let project_dir = TempDir::new().unwrap();
+        fs::write(
+            project_dir.path().join("comply.toml"),
+            "[rules.x.modules]\na = [\"b\"]\nc = []",
+        )
+        .unwrap();
+        let cfg = Config::load_from(project_dir.path()).unwrap();
+        let modules = cfg.table("x", "modules", Language::TypeScript);
+        let keys: Vec<_> = modules.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["a", "c"]);
+        assert_eq!(modules["a"], toml::Value::from(vec!["b"]));
+    }
+
+    #[test]
+    #[should_panic(expected = "[rules.\"x\"] modules` must be a table")]
+    fn table_rejects_non_table() {
+        let project_dir = TempDir::new().unwrap();
+        fs::write(
+            project_dir.path().join("comply.toml"),
+            "[rules.x]\nmodules = \"oops\"",
+        )
+        .unwrap();
+        let cfg = Config::load_from(project_dir.path()).unwrap();
+        let _ = cfg.table("x", "modules", Language::TypeScript);
     }
 
     #[test]

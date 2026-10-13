@@ -769,6 +769,14 @@ impl ImportIndex {
         self.imports.get(self.canonical_key(path)).map_or(&[], Vec::as_slice)
     }
 
+    /// Resolved origin files of `path`'s `export … from` declarations.
+    #[must_use]
+    pub fn reexport_origins(&self, path: &Path) -> &[PathBuf] {
+        self.reexport_edges
+            .get(self.canonical_key(path))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// `true` when `target` is the only indexed source file living directly in
     /// its parent directory (files in subdirectories are not counted). Such a
     /// lone `index` is the module itself organized across its own subtree, not

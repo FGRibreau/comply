@@ -626,6 +626,22 @@ ignore = []
 [rules.filename-naming-convention]
 min_dominant_share = 0.6
 
+# ---------------------------------------------------------------
+# module-dependencies
+# `root` is relative to comply.toml; empty turns the rule off.
+# `wildcard` makes each subfolder of a family its own module.
+# Example:
+#   root = "src"
+#   wildcard = "features/*"
+#   [rules.module-dependencies.modules]
+#   failure = ["api", "ui"]
+#   "features/*" = ["ui"]
+# ---------------------------------------------------------------
+[rules.module-dependencies]
+root = ""
+wildcard = ""
+modules = {}
+
 [rules.no-approximative-numeric-constant]
 # A numeric literal that coincidentally matches a Math constant prefix is data,
 # not a symbolic constant, when it sits among many siblings in a numeric array
