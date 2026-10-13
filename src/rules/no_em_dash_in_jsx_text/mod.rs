@@ -5,7 +5,7 @@
 //! anti-slop family (`banned-comment-*`) flags the same tell in comments, this
 //! one flags it in the text users actually see. It inspects `JSXText` node
 //! content and the string-literal values of copy-bearing JSX attributes
-//! (`title`, `label`, `placeholder`, `alt`, `aria-label`) only — never code,
+//! (`title`, `label`, `placeholder`, `alt`, `aria-label`, `aria-description`) only — never code,
 //! never arbitrary expressions, never non-copy attributes. A dash flanked by
 //! two digits (numeric range like `9–5`), any dash inside `<code>` / `<pre>`
 //! children, and a JSXText node whose entire trimmed content is a single dash
@@ -31,10 +31,6 @@ pub const META: RuleMeta = RuleMeta {
     skip_in_test_dir: true,
     skip_in_relaxed_dir: false,
 };
-
-/// Copy-bearing JSX attributes whose string-literal values are user-facing.
-/// Anything outside this set (`className`, `id`, data-*, …) is code, not copy.
-const COPY_ATTRS: &[&str] = &["title", "label", "placeholder", "alt", "aria-label"];
 
 /// The dashes we flag: em-dash (U+2014) and en-dash (U+2013).
 const DASHES: [char; 2] = ['\u{2014}', '\u{2013}'];

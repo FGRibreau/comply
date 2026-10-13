@@ -53,6 +53,7 @@ pub mod regex_helpers;
 pub mod regex_redos;
 mod registry;
 pub use registry::build_rust_only_rule;
+pub mod rendered_copy;
 pub mod rust_helpers;
 pub mod shell_exec_helpers;
 pub mod sql_helpers;

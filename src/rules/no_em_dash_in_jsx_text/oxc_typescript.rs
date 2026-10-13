@@ -46,7 +46,7 @@ impl OxcCheck for Check {
                 let JSXAttributeName::Identifier(name) = &attr.name else {
                     return;
                 };
-                if !super::COPY_ATTRS.contains(&name.name.as_str()) {
+                if !crate::rules::rendered_copy::COPY_ATTRS.contains(&name.name.as_str()) {
                     return;
                 }
                 let Some(JSXAttributeValue::StringLiteral(lit)) = &attr.value else {
@@ -144,6 +144,11 @@ mod tests {
         assert_eq!(run("<a title=\"Go \u{2014} home\">x</a>").len(), 1);
         assert_eq!(run("<button label=\"Save \u{2014} now\" />").len(), 1);
         assert_eq!(run("<div aria-label=\"Menu \u{2014} open\" />").len(), 1);
+    }
+
+    #[test]
+    fn flags_em_dash_in_aria_description() {
+        assert_eq!(run("<div aria-description=\"A \u{2014} B\" />").len(), 1);
     }
 
     #[test]

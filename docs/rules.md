@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2062 rules across 152 categories.
 
 ## Categories
 
@@ -22,7 +22,7 @@
 - [better-result](#better-result) (20 rules)
 - [bundle-size](#bundle-size) (3 rules)
 - [ci-cd](#ci-cd) (9 rules)
-- [code-quality](#code-quality) (258 rules)
+- [code-quality](#code-quality) (259 rules)
 - [code-quality > imports](#code-quality-imports) (4 rules)
 - [code-quality > regex](#code-quality-regex) (17 rules)
 - [comments](#comments) (7 rules)
@@ -94,7 +94,7 @@
 - [promise](#promise) (6 rules)
 - [qwik](#qwik) (1 rules)
 - [qwik > correctness](#qwik-correctness) (2 rules)
-- [react](#react) (126 rules)
+- [react](#react) (129 rules)
 - [react > code-quality](#react-code-quality) (4 rules)
 - [react > imports](#react-imports) (1 rules)
 - [react > performance](#react-performance) (3 rules)
@@ -504,6 +504,7 @@
 | `no-one-iteration-loop` | Loop body always exits on the first iteration. | Remove the loop — it is equivalent to the body running once. If a loop is intended, ensure the exit statement is guarded by a condition. |
 | `no-primitive-wrappers` | `new String()`, `new Number()`, `new Boolean()` create wrapper objects, not primitives. | Use primitive literals or factory functions without `new`: `String(x)`, `Number(x)`, `Boolean(x)`. |
 | `no-process-exit` | `process.exit()` terminates abruptly — throw an error instead. | Replace `process.exit()` with `throw new Error(...)`. Only use `process.exit()` in CLI entry points. |
+| `no-raw-invisible-character` | An invisible character written raw in a string cannot be seen in review. | Write the character as the escape the message names. |
 | `no-redundant-assignment` | Variable is assigned then immediately overwritten. | Remove the first assignment — it has no observable effect. |
 | `no-redundant-boolean` | Redundant boolean literal in a return or condition. | Simplify: `if (x) return true; else return false;` → `return x;`. `x === true` → `x`. The boolean adds no information. |
 | `no-redundant-clsx` | `clsx()` / `cn()` called with a single static string is redundant. | Remove clsx/cn wrapper when using single static string |
@@ -1622,6 +1623,9 @@
 
 | Rule | Description | Remediation |
 |------|-------------|-------------|
+| `banned-copy-words` | A word the project bans from its UI copy. | Rewrite the copy without the word, or add the phrase to `allowed` in comply.toml. |
+| `copy-apostrophe-style` | An apostrophe in UI copy that differs from the configured style. | Write the apostrophe the message names, or change `style` in comply.toml. |
+| `french-nbsp-before-punctuation` | French copy puts a non-breaking space before `:`, `;`, `?` and `!`. | Write the escaped non-breaking space the message names before the mark, replacing a plain space if there is one. |
 | `function-component-definition` | React components must be defined using `function` declarations, not arrow functions. | Replace `const MyComponent = () => <JSX />` with `function MyComponent() { return <JSX />; }`. |
 | `hook-use-state` | useState destructuring must follow `[value, setValue]` naming. | Rename the setter to `set` + PascalCase of the state variable name. |
 | `jsx-ensure-booleans` | Left-hand side of `{x && <Jsx />}` must be an unambiguous boolean. | Coerce with `!!x`, compare (`x > 0`, `x != null`), or use a ternary `cond ? <Jsx /> : null`. |
