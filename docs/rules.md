@@ -2236,7 +2236,7 @@
 | `tailwind-no-legacy-directives` | Forbid `@tailwind base/components/utilities` (v3 syntax). | Replace the three `@tailwind` directives with a single `@import "tailwindcss";` at the top of your entry stylesheet (Tailwind v4). |
 | `tailwind-no-magic-spacing` | Arbitrary pixel spacing like `p-[13px]` breaks design-token consistency. | Use the standard spacing scale (`p-1` = 4px, `p-2` = 8px, etc.) or arbitrary values that are multiples of 4. |
 | `tailwind-no-manual-dark-variants` | Forbid manual `dark:` color variants paired with raw palette colors. | Replace `bg-white dark:bg-zinc-900` with a semantic token like `bg-background` that already resolves per theme. |
-| `tailwind-no-raw-color-utilities` | Forbid raw palette color utilities (bg-white, text-gray-900, bg-blue-500). | Use semantic design tokens (bg-background, text-foreground, bg-primary, text-muted-foreground) so theming and dark mode stay centralized. |
+| `tailwind-no-raw-color-utilities` | Forbid raw palette color utilities (text-gray-900, bg-blue-500) in every class string; opt-in keys add arbitrary colors (bg-[#fff]), white/black and color literals in `style` objects. | Use semantic design tokens (bg-background, text-foreground, bg-primary, text-muted-foreground) so theming and dark mode stay centralized. |
 | `tailwind-no-restricted-classes` | User-configured policy over Tailwind classes in every class string (`className`, `cn`, `cva`, `clsx`, constants): an exact blocklist plus regex entries with allow-lists, variant and context conditions, each with its own message. | Use the project-approved equivalent. If the class is needed for a one-off, escape via the project's design-token override mechanism. |
 | `tailwind-no-tailwindcss-animate` | Forbid imports from `tailwindcss-animate`; use `tw-animate-css` instead. | Uninstall `tailwindcss-animate` and install `tw-animate-css`, then replace the import / plugin entry accordingly. |
 | `tailwind-no-unnecessary-whitespace` | Multiple consecutive spaces in className/class attributes are unnecessary. | Remove extra whitespace in class strings |
@@ -2274,7 +2274,7 @@
 
 | Rule | Description | Remediation |
 |------|-------------|-------------|
-| `tailwind-no-transition-all-layout` | Forbid `transition-all` with width/height/top/left utilities — causes layout thrash. | Animate via `translate-*` + `transition-transform` or `opacity-*` + `transition-opacity`. These are composited and never trigger layout. |
+| `tailwind-no-transition-all-layout` | Forbid `transition-all` and `transition-[…]` on a layout property (width, height, inset, margin, padding) in every class string — causes layout thrash. | Animate via `translate-*` + `transition-transform` or `opacity-*` + `transition-opacity`. These are composited and never trigger layout. |
 | `tailwind-require-aspect-ratio-on-media` | `<img>` / `<video>` without `aspect-*` or width+height causes layout shift. | Add a Tailwind `aspect-*` class (e.g. `aspect-video`) or both `width` and `height` attributes. |
 
 ## tanstack

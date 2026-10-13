@@ -94,6 +94,7 @@ struct EntryToml {
 #[serde(rename_all = "kebab-case")]
 enum Context {
     IterationCallback,
+    Conditional,
 }
 
 enum Matcher {
@@ -107,7 +108,7 @@ struct Entry {
     allow_regex: Option<Regex>,
     variant: Vec<String>,
     unless_variant: Vec<String>,
-    iteration_callback_only: bool,
+    context: Option<Context>,
     requires: Option<Regex>,
     message: String,
 }
@@ -132,7 +133,12 @@ impl Entry {
 
     /// String-level conditions: context and `requires`, read with variants.
     fn applies_to(&self, string: &ClassString) -> bool {
-        (!self.iteration_callback_only || string.in_iteration_callback)
+        let in_context = match self.context {
+            None => true,
+            Some(Context::IterationCallback) => string.in_iteration_callback,
+            Some(Context::Conditional) => string.in_conditional,
+        };
+        in_context
             && !self
                 .requires
                 .as_ref()
@@ -166,7 +172,7 @@ fn compile_entry((index, table): (usize, &toml::Table)) -> Entry {
             .map(|source| regex("allow_regex", &source)),
         variant: entry.variant,
         unless_variant: entry.unless_variant,
-        iteration_callback_only: entry.context.is_some(),
+        context: entry.context,
         requires: entry.requires.map(|source| regex("requires", &source)),
         message: entry.message,
     }
@@ -421,5 +427,57 @@ message = "second message"
         assert!(run_with_config(parameter, toml).is_empty());
         let destructured = r#"const { a } = { a: "bg-y", b: "bg-x" }; cn(a);"#;
         assert!(run_with_config(destructured, toml).is_empty());
+    }
+
+    #[test]
+    fn conditional_context_flags_branch_only() {
+        let toml = r#"
+[[rules.tailwind-no-restricted-classes.entries]]
+pattern = "^font-(semibold|bold)$"
+context = "conditional"
+message = "m"
+"#;
+        let src = r#"cn(active && "font-bold");
+            const a = <i className={ok ? "font-semibold" : ""} />;"#;
+        assert_eq!(run_with_config(src, toml).len(), 2);
+        assert!(run_with_config(r#"cn("font-bold");"#, toml).is_empty());
+    }
+
+    #[test]
+    fn natalia_scroll_and_weight_entries() {
+        let toml = r#"
+[[rules.tailwind-no-restricted-classes.entries]]
+pattern = "^overflow(-y)?-(auto|scroll)$"
+requires = "^overscroll(-y)?-(contain|none)$"
+message = "scroll"
+
+[[rules.tailwind-no-restricted-classes.entries]]
+pattern = "^font-(semibold|bold)$"
+variant = ["hover", "focus", "active", "aria-", "data-", "group-", "peer-", "has-"]
+message = "weight Use WeightReservedText."
+
+[[rules.tailwind-no-restricted-classes.entries]]
+pattern = "^font-(semibold|bold)$"
+context = "conditional"
+message = "weight"
+"#;
+        let flagged = [
+            r#"const a = <i className="overflow-y-auto" />;"#,
+            r#"const a = <i className="hover:font-semibold" />;"#,
+            r#"cn(active && "font-bold");"#,
+        ];
+        for src in flagged {
+            assert_eq!(run_with_config(src, toml).len(), 1, "{src}");
+            assert!(run_with_config(src, "").is_empty(), "{src}");
+        }
+        let hover = run_with_config(r#"const a = <i className="hover:font-semibold" />;"#, toml);
+        assert!(hover[0].message.ends_with("Use WeightReservedText."));
+        assert_eq!(
+            run_with_config(r#"cn(active && "hover:font-bold");"#, toml).len(),
+            2
+        );
+        let clean = r#"const a = <i className="overflow-y-auto overscroll-contain font-semibold" />;
+            cn("md:font-bold");"#;
+        assert!(run_with_config(clean, toml).is_empty());
     }
 }
