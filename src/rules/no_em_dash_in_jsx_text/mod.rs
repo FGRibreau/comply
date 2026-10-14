@@ -25,7 +25,7 @@ pub const META: RuleMeta = RuleMeta {
 
 /// Copy-bearing JSX attributes whose string-literal values are user-facing.
 /// Anything outside this set (`className`, `id`, data-*, …) is code, not copy.
-const COPY_ATTRS: &[&str] = &["title", "label", "placeholder", "alt", "aria-label"];
+const COPY_ATTRS: &[&str] = &["title", "label", "placeholder", "alt", "aria-label", "aria-description"];
 
 /// First flagged needle in `text`, with its byte offset.
 /// A needle between two digits (`9–5`) is a range, skipped.

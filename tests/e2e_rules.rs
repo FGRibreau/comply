@@ -109,3 +109,44 @@ fn module_dependencies_skips_test_files() {
         .stdout(predicate::str::contains("a.ts"))
         .stdout(predicate::str::contains("a.test.ts").not());
 }
+
+/// Breaks the three opt-in rules and holds a raw NBSP.
+const FRENCH_PAGE: &str =
+    "export const Page = () => <p>Attention : l'agent d\u{e9}sol\u{e9} a\u{a0}b</p>;\n";
+
+#[test]
+fn french_copy_rules_are_off_by_default() {
+    let (dir, path) = write_ts_file("Page.tsx", FRENCH_PAGE);
+    std::fs::write(
+        dir.path().join("comply.toml"),
+        "[rules.banned-copy-words]\nbanned = [\"d\u{e9}sol\u{e9}\"]\n",
+    )
+    .expect("write comply.toml");
+    common::comply()
+        .current_dir(dir.path())
+        .arg(&path)
+        .assert()
+        .stdout(predicate::str::contains("no-raw-invisible-character"))
+        .stdout(predicate::str::contains("french-nbsp-before-punctuation").not())
+        .stdout(predicate::str::contains("banned-copy-words").not())
+        .stdout(predicate::str::contains("copy-apostrophe-style").not());
+}
+
+#[test]
+fn french_copy_rules_report_once_enabled() {
+    let (dir, path) = write_ts_file("Page.tsx", FRENCH_PAGE);
+    std::fs::write(
+        dir.path().join("comply.toml"),
+        "[rules.french-nbsp-before-punctuation]\ndisabled = false\n\
+         [rules.banned-copy-words]\ndisabled = false\nbanned = [\"d\u{e9}sol\u{e9}\"]\n\
+         [rules.copy-apostrophe-style]\ndisabled = false\n",
+    )
+    .expect("write comply.toml");
+    common::comply()
+        .current_dir(dir.path())
+        .arg(&path)
+        .assert()
+        .stdout(predicate::str::contains("french-nbsp-before-punctuation"))
+        .stdout(predicate::str::contains("banned-copy-words"))
+        .stdout(predicate::str::contains("copy-apostrophe-style"));
+}

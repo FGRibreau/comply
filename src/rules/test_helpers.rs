@@ -12,6 +12,7 @@
 //!   resolves the Rust module graph
 //! - [`run_rule_in_crate`] — one file beside a real `Cargo.toml`, for a rule
 //!   that reads the manifest
+//! - [`run_oxc_rule_with_toml`] — an oxc rule under a project `comply.toml`
 //! - [`run_rule_gated`] — applies the production `applies_to_file` gate
 //! - [`run_rule_by_id`] — look up rule by string ID (for integration tests)
 
@@ -71,20 +72,41 @@ pub(crate) fn run_oxc_check(
     project: &ProjectCtx,
     file: &FileCtx,
 ) -> Vec<Diagnostic> {
+    run_oxc_check_in(check, &CheckCtx::for_test_full(path, src, project, file))
+}
+
+/// Run an `OxcCheck` under a project whose `comply.toml` holds `toml`.
+#[must_use]
+pub fn run_oxc_rule_with_toml(
+    check: &dyn OxcCheck,
+    src: &str,
+    path: impl AsRef<Path>,
+    toml: &str,
+) -> Vec<Diagnostic> {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("comply.toml"), toml).unwrap();
+    let config = crate::config::Config::load_from(dir.path()).unwrap();
+    let ctx = CheckCtx {
+        config: &config,
+        ..CheckCtx::for_test(path.as_ref(), src)
+    };
+    run_oxc_check_in(check, &ctx)
+}
+
+fn run_oxc_check_in(check: &dyn OxcCheck, ctx: &CheckCtx) -> Vec<Diagnostic> {
     crate::oxc_helpers::reset_file_caches();
-    let source_type = crate::oxc_helpers::source_type_for_path(path);
+    let source_type = crate::oxc_helpers::source_type_for_path(ctx.path);
     let allocator = Allocator::default();
-    let parse_ret = OxcParser::new(&allocator, src, source_type).parse();
+    let parse_ret = OxcParser::new(&allocator, ctx.source, source_type).parse();
     let semantic = SemanticBuilder::new().build(&parse_ret.program).semantic;
-    let ctx = CheckCtx::for_test_full(path, src, project, file);
     let kinds = check.interested_kinds();
     if kinds.is_empty() {
-        return check.run_on_semantic(&semantic, &ctx);
+        return check.run_on_semantic(&semantic, ctx);
     }
     let mut diagnostics = Vec::new();
     for node in semantic.nodes().iter() {
         if kinds.contains(&node.kind().ty()) {
-            check.run(node, &ctx, &semantic, &mut diagnostics);
+            check.run(node, ctx, &semantic, &mut diagnostics);
         }
     }
     diagnostics

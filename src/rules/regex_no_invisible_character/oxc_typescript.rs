@@ -8,26 +8,6 @@ use std::sync::Arc;
 
 pub struct Check;
 
-fn is_invisible_char(c: char) -> bool {
-    matches!(c,
-        '\u{00AD}'
-        | '\u{034F}'
-        | '\u{061C}'
-        | '\u{115F}'
-        | '\u{1160}'
-        | '\u{17B4}'
-        | '\u{17B5}'
-        | '\u{180E}'
-        | '\u{2000}'..='\u{200F}'
-        | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{206F}'
-        | '\u{FE00}'..='\u{FE0F}'
-        | '\u{FEFF}'
-        | '\u{FFF9}'..='\u{FFFB}'
-    )
-}
-
 impl OxcCheck for Check {
     fn interested_kinds(&self) -> &'static [AstType] {
         &[AstType::RegExpLiteral]
@@ -43,7 +23,7 @@ impl OxcCheck for Check {
         let AstKind::RegExpLiteral(re) = node.kind() else { return };
 
         let pattern = re.regex.pattern.text.as_str();
-        if !pattern.chars().any(is_invisible_char) {
+        if !pattern.chars().any(super::is_invisible_char) {
             return;
         }
 
@@ -57,5 +37,32 @@ impl OxcCheck for Check {
             severity: Severity::Error,
             span: None,
         });
+    }
+}
+
+#[cfg(test)]
+impl crate::rules::test_helpers::RunRule for Check {
+    fn meta(&self) -> &'static crate::rules::meta::RuleMeta {
+        &super::META
+    }
+    fn execute_with_ctx(
+        &self,
+        src: &str,
+        path: &std::path::Path,
+        project: &crate::project::ProjectCtx,
+        file: &crate::rules::file_ctx::FileCtx,
+    ) -> Vec<crate::diagnostic::Diagnostic> {
+        crate::rules::test_helpers::run_oxc_check(self, src, path, project, file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rules::test_helpers::run_rule;
+
+    #[test]
+    fn flags_raw_nbsp_in_regex() {
+        assert_eq!(run_rule(&Check, "const r = /a\u{a0}b/;", "t.ts").len(), 1);
     }
 }

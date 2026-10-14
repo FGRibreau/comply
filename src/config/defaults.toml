@@ -339,6 +339,21 @@ disabled = true
 [rules.no-throw]
 disabled = true
 
+# French copy typography, tied to the project's language.
+[rules.french-nbsp-before-punctuation]
+disabled = true
+
+# `banned`: words flagged in UI copy. `allowed`: phrases exempting them.
+[rules.banned-copy-words]
+disabled = true
+banned = []
+allowed = []
+
+# `style`: "typographic" (’) or "straight" (').
+[rules.copy-apostrophe-style]
+disabled = true
+style = "typographic"
+
 # ---------------------------------------------------------------
 # Rust correctness / observability — no thresholds, listed here
 # so `comply config print` surfaces them and users can flip

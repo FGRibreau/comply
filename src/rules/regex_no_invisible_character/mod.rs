@@ -20,6 +20,29 @@ pub const META: RuleMeta = RuleMeta {
     skip_in_relaxed_dir: false,
 };
 
+/// True for a codepoint that renders blank.
+/// `no-raw-invisible-character` reads the same set.
+pub(crate) fn is_invisible_char(c: char) -> bool {
+    matches!(c,
+        '\u{00A0}'
+        | '\u{00AD}'
+        | '\u{034F}'
+        | '\u{061C}'
+        | '\u{115F}'
+        | '\u{1160}'
+        | '\u{17B4}'
+        | '\u{17B5}'
+        | '\u{180E}'
+        | '\u{2000}'..='\u{200F}'
+        | '\u{202A}'..='\u{202F}'
+        | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}'
+        | '\u{FE00}'..='\u{FE0F}'
+        | '\u{FEFF}'
+        | '\u{FFF9}'..='\u{FFFB}'
+    )
+}
+
 pub fn register() -> RuleDef {
     RuleDef {
         meta: META,
