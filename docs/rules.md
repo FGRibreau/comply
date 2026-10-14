@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2059 rules across 152 categories.
+2064 rules across 152 categories.
 
 ## Categories
 
@@ -22,7 +22,7 @@
 - [better-result](#better-result) (20 rules)
 - [bundle-size](#bundle-size) (3 rules)
 - [ci-cd](#ci-cd) (9 rules)
-- [code-quality](#code-quality) (259 rules)
+- [code-quality](#code-quality) (260 rules)
 - [code-quality > imports](#code-quality-imports) (4 rules)
 - [code-quality > regex](#code-quality-regex) (17 rules)
 - [comments](#comments) (7 rules)
@@ -70,7 +70,7 @@
 - [json](#json) (1 rules)
 - [kubernetes](#kubernetes) (60 rules)
 - [lint-comments](#lint-comments) (3 rules)
-- [naming](#naming) (10 rules)
+- [naming](#naming) (11 rules)
 - [nextjs](#nextjs) (24 rules)
 - [nextjs > accessibility](#nextjs-accessibility) (1 rules)
 - [nextjs > performance](#nextjs-performance) (4 rules)
@@ -511,6 +511,7 @@
 | `no-redundant-jump` | Redundant `return;` at end of function or `continue;` at end of loop body. | Remove the redundant `return;` or `continue;` — execution already falls through naturally. |
 | `no-redundant-null-undefined-check` | Comparing the same operand against both `null` and `undefined` is a verbose nullish check. | Collapse `x !== null && x !== undefined` (or the `x === null \|\| x === undefined` mirror) into a single strict, type-narrowing guard — not the loose `x != null`, which fights projects that ban `==`/`!=`. Define once: `function isDefined<T>(v: T): v is NonNullable<T> { return v !== null && v !== undefined; }`, then use `isDefined(x)` / `!isDefined(x)`. It narrows to `NonNullable<T>` (e.g. `arr.filter(isDefined)`). No autofix — the helper's name and location are project-specific. |
 | `no-restricted-object-keys` | User-configured keys forbidden in an object literal passed under a named property or JSX prop. | Follow the entry's message: use the project-approved token or move the value out of this object. |
+| `no-restricted-properties` | User-configured `object.property` access, bracket access or destructuring, each entry with its own message. | Follow the message of the entry; scope an allowed file with `[overrides."<glob>"] disable`. |
 | `no-shallow-passthrough-method` | Method body only forwards arguments to another method with the same signature. | Inline the call at each call-site or add real behaviour — a pure pass-through adds a layer with no value. |
 | `no-side-effects-in-initialization` | Top-level side effects (bare calls, `new`, IIFE) at module scope prevent tree-shaking. | Avoid side effects at module top-level for tree-shaking |
 | `no-single-promise-in-promise-methods` | Wrapping a single-element array with `Promise.all/any/race()` is unnecessary. | Use the value directly instead of wrapping it in a Promise method: `await single` instead of `await Promise.all([single])`. |
@@ -1391,6 +1392,7 @@
 | `no-generic-names` | Generic names and mechanical prefixes carry no meaning. | Rename to describe what the value IS or what the function accomplishes. `data` → `parsedOrder`, `temp` → name the actual intermediate, `processOrder` → `fulfillOrder`, `doPayment` → `chargeCustomer`. |
 | `no-interface-prefix-i` | TypeScript interface uses the `I` prefix (Hungarian notation). | Remove the `I` prefix — name the interface after the concept, not the language construct. |
 | `no-misleading-collection-name` | Variable name lies about the underlying collection type. | Rename the binding to match the actual type — `userArray` holding a `Set` becomes `userSet`, `nameMap` holding an `Array` becomes `nameArray`. The name and the type must agree. |
+| `no-restricted-identifier-terms` | Declared name contains a term the project bans, matched case-insensitively as a substring. | Rename the symbol without the term. List banned terms via `terms = ["shape"]` in comply.toml. |
 | `no-set-x-to-y` | Function names like setStatusToClosed encode implementation, not intent. | Rename to express the INTENT, not the storage operation: `setStatusToClosed` → `closeAccount`, `setRoleToAdmin` → `promoteToAdmin`. Callers should read like a story, not a database update. |
 | `no-type-encoded-names` | Identifiers must not encode their type (`strName`, `arrItems`). | Remove the type prefix. TypeScript's type checker already tells you the type — encoding it in the name is obsolete and lies when the type changes. |
 | `screaming-snake-for-constants` | Top-level constant not in `SCREAMING_SNAKE_CASE`. | Rename the constant to use `SCREAMING_SNAKE_CASE`. |
