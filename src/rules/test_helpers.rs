@@ -14,6 +14,7 @@
 //!   that reads the manifest
 //! - [`run_rule_gated`] — applies the production `applies_to_file` gate
 //! - [`run_rule_by_id`] — look up rule by string ID (for integration tests)
+//! - [`run_oxc_check_with_config`] — an OXC check under a project `comply.toml`
 
 #![cfg(test)]
 
@@ -77,17 +78,52 @@ pub(crate) fn run_oxc_check(
     let parse_ret = OxcParser::new(&allocator, src, source_type).parse();
     let semantic = SemanticBuilder::new().build(&parse_ret.program).semantic;
     let ctx = CheckCtx::for_test_full(path, src, project, file);
+    dispatch_oxc_check(check, &semantic, &ctx)
+}
+
+fn dispatch_oxc_check(
+    check: &dyn OxcCheck,
+    semantic: &oxc_semantic::Semantic<'_>,
+    ctx: &CheckCtx,
+) -> Vec<Diagnostic> {
     let kinds = check.interested_kinds();
     if kinds.is_empty() {
-        return check.run_on_semantic(&semantic, &ctx);
+        return check.run_on_semantic(semantic, ctx);
     }
     let mut diagnostics = Vec::new();
     for node in semantic.nodes().iter() {
         if kinds.contains(&node.kind().ty()) {
-            check.run(node, &ctx, &semantic, &mut diagnostics);
+            check.run(node, ctx, semantic, &mut diagnostics);
         }
     }
     diagnostics
+}
+
+/// Run an OxcCheck on TypeScript `src` under a project `comply.toml`.
+#[must_use]
+pub fn run_oxc_check_with_config(
+    check: &dyn OxcCheck,
+    src: &str,
+    comply_toml: &str,
+) -> Vec<Diagnostic> {
+    let project_dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(project_dir.path().join("comply.toml"), comply_toml).expect("write cfg");
+    let config = crate::config::Config::load_from(project_dir.path()).expect("load cfg");
+    crate::oxc_helpers::reset_file_caches();
+    let allocator = Allocator::default();
+    let parse_ret = OxcParser::new(&allocator, src, oxc_span::SourceType::ts()).parse();
+    let semantic = SemanticBuilder::new().build(&parse_ret.program).semantic;
+    let path = Path::new("t.ts");
+    let ctx = CheckCtx {
+        path,
+        path_arc: std::sync::Arc::from(path),
+        source: src,
+        config: &config,
+        project: crate::project::default_static_project_ctx(),
+        file: crate::rules::file_ctx::default_static_file_ctx(),
+        lang: Language::TypeScript,
+    };
+    dispatch_oxc_check(check, &semantic, &ctx)
 }
 
 /// Run a rule against `src`, using the language inferred from `path`.

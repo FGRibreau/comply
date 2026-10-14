@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2065 rules across 152 categories.
 
 ## Categories
 
@@ -144,7 +144,7 @@
 - [testing > testing-library](#testing-testing-library) (3 rules)
 - [testing > vitest](#testing-vitest) (7 rules)
 - [type-safety](#type-safety) (1 rules)
-- [typescript](#typescript) (187 rules)
+- [typescript](#typescript) (194 rules)
 - [typescript > async](#typescript-async) (5 rules)
 - [typescript > code-quality](#typescript-code-quality) (1 rules)
 - [typescript > jsdoc](#typescript-jsdoc) (2 rules)
@@ -2493,6 +2493,7 @@
 | `max-params` | Functions should take at most 4 positional arguments. | If you need more than 4 parameters, pack them into an options object — named fields carry intent where positional arguments don't. |
 | `no-alert` | `alert`, `confirm`, and `prompt` block the UI thread. | Replace `alert`/`confirm`/`prompt` with a non-blocking UI component. These browser dialogs freeze the page and rarely belong in shipped code. |
 | `no-async-promise-executor` | The `Promise` executor must not be `async`. | Remove `async` from the `new Promise(async (resolve) => ...)` executor. Errors thrown inside an async executor are swallowed and never reject the promise. |
+| `no-chained-type-assertions` | A chained type assertion asserts a type nothing checked. | Parse the value into the target type instead of asserting through another type. |
 | `no-class-assign` | A class binding must not be reassigned. | Don't assign to a `class` declaration's name. Reassigning it shadows the class and is almost always a mistake. |
 | `no-compare-neg-zero` | Comparing against `-0` is misleading. | Replace `x === -0` with `Object.is(x, -0)`. The `===` operator treats `-0` and `0` as equal, so the comparison never does what it looks like. |
 | `no-conditional-async-return` | Function returns `T` on one branch and `Promise<T>` on another — always return a promise for consistency. | If the function is async, every branch must return a value (or `await` a promise). If sync, don't return a promise on some branches. |
@@ -2522,6 +2523,7 @@
 | `no-inline-param-type` | Inline object types in parameters resist reuse and refactoring. | Extract the inline type to a named `type` declaration above the function. A named type has an identity, can be shared across call sites, and shows up in IDE hover. |
 | `no-irregular-whitespace` | Irregular whitespace characters break tooling. | Replace non-standard whitespace such as a non-breaking or zero-width space with a regular space. Invisible characters cause confusing parse and diff errors. |
 | `no-json-parse-cast` | `JSON.parse(x) as T` is a lie — validate the runtime shape. | Replace the cast with runtime validation: `const parsed = UserSchema.safeParse(JSON.parse(raw))` (Zod) or a hand-written type guard that inspects the value. |
+| `no-known-value-widening` | An annotation widens a literal value the compiler already knew. | Drop the annotation, or write `as const` / `satisfies T` to keep the literal type. |
 | `no-label-var` | A label must not share a name with an in-scope variable. | Rename the label or the variable. Reusing the same name makes `break name` ambiguous to readers. |
 | `no-lone-blocks` | A standalone block with no block-scoped declarations is dead structure. | Remove the redundant `{ }`. A bare block only matters when it scopes `let`/`const`/`class`; otherwise it just adds indentation. |
 | `no-multi-assign` | Chained assignments hide what is being set. | Split `a = b = c` into separate statements. Chained assignment obscures which variables are declared and which are mutated. |
@@ -2534,6 +2536,7 @@
 | `no-process-global` | Usage of the Node `process` global is discouraged — it is hard for tools to statically analyze. | Import `process` explicitly with `import process from "node:process";` instead of relying on the implicit global. |
 | `no-redundant-optional` | `prop?: Type \| undefined` — the `?` already implies `\| undefined` (unless tsconfig sets `exactOptionalPropertyTypes`). | Remove `\| undefined` from the type, or remove the `?` from the property name. |
 | `no-return-type-any` | Functions with explicit `: any` return type defeat type safety. | Replace `: any` with a specific return type or use `unknown` if the type is truly dynamic. |
+| `no-runtime-typeof` | A runtime `typeof` re-checks by hand what a parsed type guarantees. | Parse the value at its boundary into a typed value, then trust the type. |
 | `no-self-assign` | Assigning a variable to itself does nothing. | Remove the `x = x` assignment or fix the typo — you likely meant a different value or property. |
 | `no-self-compare` | Comparing a value with itself is trivially true or false. | Replace `x === x` with the intended operands. The only real use, NaN detection, is clearer as `Number.isNaN(x)`. |
 | `no-sequences` | The comma operator hides multiple expressions in one. | Split comma-separated expressions into separate statements. The comma operator evaluates each and returns the last, which surprises most readers. |
@@ -2544,14 +2547,17 @@
 | `no-type-assertion` | Bans all `as T` type assertions. | Use `satisfies T` for validation, type guards for narrowing, or generics for polymorphism. |
 | `no-typeof-prefer-schema` | Validating the shape of freshly-deserialized data (`JSON.parse`, `response.json()`) with chained `typeof` checks is error-prone — use a schema validator (zod, valibot, …). | Replace the chained `typeof` checks with a schema parsed at the boundary, e.g. `const User = z.object({ name: z.string(), age: z.number() }); User.parse(data)`. A single `typeof x === 'string'` narrowing is fine — this targets multi-property shape checks. |
 | `no-unassigned-vars` | A variable that is read but never assigned is always undefined. | Assign the variable a value or remove it. A `let`/`var` that is only ever read holds `undefined`, usually a forgotten assignment. |
+| `no-unknown-parameters` | A parameter declared `unknown` accepts an unparsed value. | Accept a named domain type, and parse external input at its boundary. |
 | `no-unknown-returns` | A declared `unknown` return hands the caller an unparsed value. | Return a named domain type, and parse the value where it is produced. |
 | `no-unknown-type-aliases` | A type alias resolving to `unknown` names a decision that was never made. | Name the type the value actually has, and narrow at the parsing boundary. |
 | `no-unreachable` | Code after a terminating statement never runs. | Remove the unreachable statements after a `return`/`throw`/`break`/`continue`, or fix the control flow that strands them. |
+| `no-unsafe-dictionary-type` | A dictionary type leaves every value untyped. | Give the dictionary a named value type, or model the object with known keys. |
 | `no-unused-labels` | A label that is never referenced is dead. | Remove the unused label. If you meant to jump to it, add the matching `break`/`continue`. |
 | `no-useless-catch` | A catch that only rethrows is pointless. | If the catch block just rethrows the original error, remove it — the error propagates identically without the ceremony. |
 | `no-useless-intersection` | Intersecting with `unknown` or `never` is useless — `& unknown` is a no-op, `& never` collapses to `never`. | Remove `& unknown` (no-op) or simplify `Foo & never` to `never`. |
 | `no-useless-rename` | Renaming a binding to the same name is redundant. | Simplify `{ foo: foo }` to `{ foo }` in imports, exports, and destructuring. Renaming a binding to itself is pure noise. |
 | `no-var` | Never declare variables with `var`. | Replace `var` with `const` (or `let` only when the binding actually needs to be reassigned). |
+| `no-widen-then-assert` | An assertion claims back the literal type an annotation widened away. | Drop the widening annotation so the `const` keeps its literal type. |
 | `object-shorthand` | Use shorthand for object properties and methods. | Write `{ foo }` instead of `{ foo: foo }` and `{ method() {} }` instead of `{ method: function () {} }`. Shorthand is the consistent, modern form. |
 | `operator-assignment` | Prefer compound assignment operators. | Replace `x = x + 1` with `x += 1`, and likewise for the other operators. Shorthand states the intent and avoids repeating the target. |
 | `option-vs-result` | Functions named `find*`/`get*` returning `null`/`undefined` should use an Option type. | Wrap the return value in an Option/Result type instead of returning bare `null` or `undefined`. This makes the absence of a value explicit in the type system. |
@@ -2570,6 +2576,7 @@
 | `promise/param-names` | Promise discipline — avoid classic async footguns. | Name Promise executor parameters `resolve` and `reject`. Any other names confuse reviewers. |
 | `public-static-readonly` | `public static` fields without `readonly` allow accidental mutation. | Add `readonly` to `public static` fields: `public static readonly X = ...`. |
 | `redundant-type-aliases` | `type X = Y` where Y is a single type adds no structure — it's just renaming. | Use the original type directly, or add structure (union, intersection, generics) to justify the alias. |
+| `require-safety-comment-for-type-assertion` | A type assertion carries no comment saying why it holds. | Write the marker comment (default `// SAFETY:`) with the reason above the assertion. |
 | `symbol-description` | Every `Symbol()` should carry a description. | Pass a description to `Symbol('...')`. The description is the only thing that identifies a symbol when debugging. |
 | `ts-adjacent-overload-signatures` | Function overload signatures must be consecutive for readability. | Move all overload signatures for the same function name next to each other. |
 | `ts-ban-ts-comment` | `@ts-ignore` and `@ts-nocheck` suppress compiler errors and hide bugs. | Fix the underlying type error, or use `@ts-expect-error` with a description. |

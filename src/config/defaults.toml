@@ -322,6 +322,30 @@ disabled = true
 [rules.no-throw]
 disabled = true
 
+[rules.no-chained-type-assertions]
+disabled = true
+
+[rules.no-widen-then-assert]
+disabled = true
+
+[rules.require-safety-comment-for-type-assertion]
+disabled = true
+marker = "SAFETY:"
+
+[rules.no-unknown-parameters]
+disabled = true
+allowed_names = ["cause"]
+
+[rules.no-unsafe-dictionary-type]
+disabled = true
+
+[rules.no-runtime-typeof]
+disabled = true
+allow_in_type_guards = false
+
+[rules.no-known-value-widening]
+disabled = true
+
 # ---------------------------------------------------------------
 # Rust correctness / observability — no thresholds, listed here
 # so `comply config print` surfaces them and users can flip
