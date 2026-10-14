@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2060 rules across 152 categories.
 
 ## Categories
 
@@ -126,7 +126,7 @@
 - [sql > concurrency](#sql-concurrency) (1 rules)
 - [sql > constraints](#sql-constraints) (1 rules)
 - [sql > indexing](#sql-indexing) (2 rules)
-- [sql > migrations](#sql-migrations) (6 rules)
+- [sql > migrations](#sql-migrations) (8 rules)
 - [style](#style) (1 rules)
 - [tailwind](#tailwind) (23 rules)
 - [tailwind > accessibility](#tailwind-accessibility) (6 rules)
@@ -2206,6 +2206,8 @@
 | `sql-create-index-in-transaction` | `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block. | Move `CREATE INDEX CONCURRENTLY` outside of `BEGIN`/`COMMIT`. Most migration tools have an option to disable the implicit transaction wrapper for a single migration. |
 | `sql-drop-table-no-cascade-warning` | `DROP TABLE` without `IF EXISTS` fails noisily on rerun, and `DROP TABLE ... CASCADE` silently destroys dependent objects. | Add `IF EXISTS` so reruns are idempotent. Avoid `CASCADE` — drop dependents explicitly so the migration documents what gets removed. |
 | `sql-pg-enum-with-alter-type-add-value` | `ALTER TYPE ... ADD VALUE` cannot run inside a transaction block before PostgreSQL 12, and even on newer versions the new value is not usable in the same transaction. | Run `ALTER TYPE ... ADD VALUE` outside `BEGIN`/`COMMIT`. If you need the new value within a transaction, prefer a CHECK-constrained text column over a true ENUM. |
+| `sql-update-replace-needs-row-check` | A migration `UPDATE … SET col = replace(col, …)` must check how many rows it changed. | Count the target rows `INTO expected` before the UPDATE, then `GET DIAGNOSTICS n = ROW_COUNT;` and `IF n <> expected THEN RAISE EXCEPTION …`. A check on zero rows alone fails on an empty database. |
+| `sql-validate-constraint-separate-migration` | A constraint added `NOT VALID` must not be validated in the same migration. | Move `ALTER TABLE t VALIDATE CONSTRAINT t_a_chk` to a later migration. In one transaction, the VALIDATE holds the lock that `NOT VALID` was meant to avoid. |
 
 ## style
 
