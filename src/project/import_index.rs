@@ -3125,7 +3125,7 @@ fn declarator_binds_call_to(decl: Node, source: &[u8], factories: &[&str]) -> bo
 /// - `{ a = 1 }`               → `a`
 /// - `[a, b, ...rest]`         → `a`, `b`, `rest`
 /// - `{ a: { b }, ...rest }`   → `b`, `rest`
-fn collect_pattern_names(node: Node, source: &[u8], out: &mut Vec<String>) {
+pub(crate) fn collect_pattern_names(node: Node, source: &[u8], out: &mut Vec<String>) {
     match node.kind() {
         "identifier" => out.push(text_of(node, source)),
         "shorthand_property_identifier_pattern" => out.push(text_of(node, source)),
