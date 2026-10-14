@@ -699,6 +699,14 @@ route_boundary_patterns = [
 ]
 
 # ---------------------------------------------------------------
+# no-undeclared-env-var
+# Env var names never flagged, e.g. tooling names. Empty by default.
+# Example: allowed = ["NODE_ENV"]
+# ---------------------------------------------------------------
+[rules.no-undeclared-env-var]
+allowed = []
+
+# ---------------------------------------------------------------
 # no-unknown-pseudo-class
 # Unknown pseudo-class names to allow (case-insensitive), e.g.
 # framework-specific custom pseudo-classes. Empty by default.
