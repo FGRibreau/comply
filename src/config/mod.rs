@@ -242,10 +242,8 @@ impl Config {
         s
     }
 
-    /// Shared lookup for the accessors whose key is mandatory
-    /// (`threshold` / `float` / `bool_flag` / `string` /
-    /// `required_string_list`). Panics with a uniform "missing key"
-    /// message so those APIs don't duplicate the same boilerplate.
+    /// Shared lookup for the mandatory-key accessors.
+    /// Panics with one uniform "missing key" message.
     fn extra_value(&self, rule_id: &str, key: &str, lang: Language) -> &toml::Value {
         if let Some(value) = self
             .lang_config
@@ -317,6 +315,22 @@ impl Config {
                 text.to_string()
             })
             .collect()
+    }
+
+    /// Read `[[rules.<rule_id>.<key>]]` as tables, in declaration order.
+    /// Panics unless the key holds an array of tables.
+    #[must_use]
+    pub fn table_list(&self, rule_id: &str, key: &str, lang: Language) -> Vec<&toml::Table> {
+        let configured = self.extra_value(rule_id, key, lang);
+        let Some(tables) = configured
+            .as_array()
+            .and_then(|entries| entries.iter().map(toml::Value::as_table).collect())
+        else {
+            panic!(
+                "config key `[rules.\"{rule_id}\"] {key}` must be an array of tables, got {configured:?}"
+            );
+        };
+        tables
     }
 
     fn from_raw(mut raw: ComplyToml) -> Result<Self> {
@@ -560,6 +574,52 @@ mod tests {
         let cfg = Config::load_from(tmp.path()).unwrap();
         let list = cfg.string_list("ts-no-restricted-imports", "patterns", Language::TypeScript);
         assert_eq!(list, vec!["@banned/*", "legacy"]);
+    }
+
+    #[test]
+    fn table_list_reads_entries_in_order() {
+        let project_dir = TempDir::new().unwrap();
+        fs::write(
+            project_dir.path().join("comply.toml"),
+            r#"
+            [[rules.x.entries]]
+            message = "a"
+            pattern = "p"
+
+            [[rules.x.entries]]
+            message = "b"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::load_from(project_dir.path()).unwrap();
+        let entries = cfg.table_list("x", "entries", Language::TypeScript);
+        let messages: Vec<_> = entries.iter().map(|e| e["message"].as_str()).collect();
+        assert_eq!(messages, vec![Some("a"), Some("b")]);
+        assert_eq!(entries[0]["pattern"].as_str(), Some("p"));
+    }
+
+    #[test]
+    fn table_list_defaults_to_empty_list() {
+        let base: ComplyToml = toml::from_str("[rules.x]\nentries = []").unwrap();
+        let user: ComplyToml = toml::from_str("[rules.x]\ndisabled = false").unwrap();
+        let cfg = Config::from_raw(merge(base, user)).unwrap();
+        assert!(
+            cfg.table_list("x", "entries", Language::TypeScript)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "[rules.\"x\"] entries` must be an array of tables")]
+    fn table_list_rejects_non_array() {
+        let project_dir = TempDir::new().unwrap();
+        fs::write(
+            project_dir.path().join("comply.toml"),
+            "[rules.x]\nentries = \"oops\"",
+        )
+        .unwrap();
+        let cfg = Config::load_from(project_dir.path()).unwrap();
+        let _ = cfg.table_list("x", "entries", Language::TypeScript);
     }
 
     #[test]
