@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2060 rules across 152 categories.
 
 ## Categories
 
@@ -102,14 +102,14 @@
 - [react-native](#react-native) (17 rules)
 - [react-native > security](#react-native-security) (1 rules)
 - [regex](#regex) (33 rules)
-- [rust](#rust) (80 rules)
+- [rust](#rust) (81 rules)
 - [rust > api](#rust-api) (3 rules)
 - [rust > architecture](#rust-architecture) (1 rules)
 - [rust > async](#rust-async) (1 rules)
 - [rust > concurrency](#rust-concurrency) (2 rules)
 - [rust > configuration](#rust-configuration) (1 rules)
 - [rust > correctness](#rust-correctness) (3 rules)
-- [rust > observability](#rust-observability) (1 rules)
+- [rust > observability](#rust-observability) (2 rules)
 - [rust > performance](#rust-performance) (11 rules)
 - [rust > security](#rust-security) (2 rules)
 - [rust > serde](#rust-serde) (1 rules)
@@ -1893,6 +1893,7 @@
 | `rust-no-linkedlist` | Prefer `Vec<T>` over `LinkedList<T>` — cache locality wins. | Replace `LinkedList<T>` with `Vec<T>` or `VecDeque<T>`. LinkedList's theoretical O(1) splice is dominated in practice by Vec's cache locality for any realistic size. Enable `clippy::linkedlist`. |
 | `rust-no-lossy-as-cast` | `as` casts that can truncate or lose precision are silent bugs. | Replace the `as` cast with `try_into()` (returns Result) or `u8::try_from(x)` for integer narrowing. For guaranteed-safe widening casts (`u8` → `u32`), use `From::from(x)` / `x.into()` instead — explicit, documents the conversion is total. |
 | `rust-no-panic-macros` | No `panic!` / `todo!` / `unimplemented!` / `unreachable!` in production. | Replace the macro with a typed Result error. `todo!()` and `unimplemented!()` mark placeholders that must not ship. `unreachable!()` should only mark compiler-proven impossible states with a `// Impossible: ...` comment. Tests are exempted — panicking in a `#[test]` is a clean failure. |
+| `rust-no-parse-unwrap-or` | `.parse()` chained into `unwrap_or*` turns a corrupt value into a silent default. | Propagate the parse error with `?` or a typed error. Keep a deliberate fallback with `// comply-ignore: rust-no-parse-unwrap-or — <reason>`. |
 | `rust-no-print-macros` | `println!` writes past the logging pipeline. | Outside a binary's own output path, replace `println!` with a `tracing` macro (`tracing::info!`, `tracing::warn!`, `tracing::error!`) so the consumer's subscriber decides the level, the target and the sink. In a CLI, where stdout is the product, write through `std::io::stdout().lock()` + `writeln!` — it is buffered and the lint does not fire on it — or put `#[expect(clippy::print_stdout, reason = "CLI output")]` on `main`. Enforced by `clippy::print_stdout`. |
 | `rust-no-println-in-async` | `println!` / `eprintln!` inside async code blocks the runtime. | Replace `println!("…")` / `eprintln!("…")` with a `tracing` macro (`tracing::info!`, `tracing::warn!`, `tracing::error!`). `println!` takes a blocking stdout lock — inside an async task that stalls the reactor and interleaves output from concurrent tasks. Tracing macros are non-blocking and respect subscriber filters/spans. |
 | `rust-no-pub-use-glob` | `pub use foo::*` re-exports invisibly. | List the re-exports explicitly: `pub use foo::{Bar, Baz};`. Glob re-exports turn every change in `foo` into a silent change to your public API. |
@@ -1977,6 +1978,7 @@
 | Rule | Description | Remediation |
 |------|-------------|-------------|
 | `rust-prefer-tracing-over-log` | Use the `tracing` crate instead of `log`. | Replace `use log::…` and `log::{info,warn,error,debug,trace}!` with the equivalent `tracing` macros. `tracing` carries structured fields and span context across `async` boundaries, which `log` does not. The two crates can interoperate via `tracing-log` if you must support an external dependency that emits through `log`. |
+| `rust-tracing-structured-fields` | `tracing` event messages must not interpolate values; use structured fields. | Replace `warn!("fetch {url} failed: {e}")` with `warn!(%url, error = %e, "fetch failed")`. Fields stay queryable; an interpolated message is opaque text. |
 
 ## rust > performance
 
