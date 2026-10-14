@@ -486,6 +486,17 @@ entries = []
 patterns = []
 entries = []
 
+# Opt-in object-key policy. Empty by default — the rule is a no-op until a
+# project lists entries, each with these keys:
+#   [[rules.no-restricted-object-keys.entries]]
+#   contexts = ["transition"]  # property or JSX prop names
+#   keys = ["type"]            # keys flagged in the reached objects
+#   when_value = ["spring"]    # set: only these literal values
+#   unless_value = []          # literal values that pass
+#   message = "Use the spring tokens." # unset: names key and context
+[rules.no-restricted-object-keys]
+entries = []
+
 # Opt-in required-scripts check for package.json. Empty by default — the rule
 # is a no-op until a project lists the npm scripts it expects every package to
 # define, e.g.:
