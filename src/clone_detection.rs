@@ -1,7 +1,7 @@
 //! Native token-based clone detection (Rabin-Karp).
 //!
 //! - Parse each file with tree-sitter, extract leaf tokens
-//! - Hash sliding windows of MIN_TOKENS tokens
+//! - Hash sliding windows of `min_tokens` tokens (`[rules.no-clones]`)
 //! - Cross-file collisions with token-by-token verification = clones
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -9,31 +9,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use rayon::prelude::*;
 use tree_sitter::Parser;
 
+use crate::config::Config;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::files::{Language, SourceFile};
 use crate::parsing;
 
 pub const RULE_ID: &str = "no-clones";
-const MIN_TOKENS: usize = 100;
 /// Polynomial multiplier for the sliding-window Rabin-Karp hash.
 const WINDOW_HASH_MULT: u64 = 6_364_136_223_846_793_005;
 const BUCKET_SATURATED: usize = 64;
-/// Minimum number of distinct token-text trigrams required in a match window.
-///
-/// Filters out low-entropy boilerplate (e.g. registration tables of
-/// `(Lang, Backend::TreeSitter(Box::new(foo::Check)))`) where 100+ tokens
-/// can match exactly across files but consist mostly of repeated 3-token
-/// subsequences. Genuine duplicated logic — each statement carrying fresh
-/// identifiers — yields many more distinct trigrams than this threshold.
-const MIN_DISTINCT_TRIGRAMS: usize = 145;
-/// Maximum non-covered token gap that marks a file pair as "symmetric siblings"
-/// rather than accidental duplicates.  When two files are identical except for
-/// one small load-bearing block (e.g. deactivate vs. reactivate handlers), the
-/// tokens in that block are not part of any matching window.  If the reporter
-/// file has fewer than this many uncovered tokens, the pair is suppressed.
-/// Must be strictly less than the gap produced by the `merge_refuses_non_adjacent_canonical`
-/// test (52 tokens with the current test parameters).
-const SYMMETRIC_SIBLING_GAP_THRESHOLD: usize = MIN_TOKENS / 2; // 50
 
 struct Token {
     kind_id: u16,
@@ -58,7 +42,16 @@ struct Occurrence {
 type RawClone = (usize, usize, usize, usize, usize, usize);
 
 #[must_use]
-pub fn lint_files(files: &[&SourceFile]) -> Vec<Diagnostic> {
+pub fn lint_files(files: &[&SourceFile], config: &Config) -> Vec<Diagnostic> {
+    // One window serves all languages; lookup language is immaterial.
+    let min_tokens = config.threshold(RULE_ID, "min_tokens", Language::TypeScript);
+    let min_distinct_trigrams =
+        config.threshold(RULE_ID, "min_distinct_trigrams", Language::TypeScript);
+    assert!(
+        min_tokens > 0,
+        "config key `[rules.\"no-clones\"] min_tokens` must be at least 1"
+    );
+
     // Sample/example/docs/fixture/bench directories hold intentionally
     // self-contained, duplicated code (multi-bundler demos, standalone sample
     // apps). Generated files (e.g. TanStack Router's `routeTree.gen.ts`) are
@@ -83,8 +76,14 @@ pub fn lint_files(files: &[&SourceFile]) -> Vec<Diagnostic> {
         .map_init(Parser::new, |parser, file| tokenize_file(parser, file))
         .collect();
 
-    let mut raw = find_raw_clones(&file_data);
-    merge_and_emit(&mut raw, &file_data, &files)
+    let mut raw = find_raw_clones(&file_data, min_tokens);
+    merge_and_emit(
+        &mut raw,
+        &file_data,
+        &files,
+        min_tokens,
+        min_distinct_trigrams,
+    )
 }
 
 /// Number of hash shards `find_raw_clones` fans out over. Each window hash
@@ -95,39 +94,44 @@ pub fn lint_files(files: &[&SourceFile]) -> Vec<Diagnostic> {
 /// order *within* one bucket.
 const FIND_SHARDS: u64 = 16;
 
-fn find_raw_clones(file_data: &[Option<FileTokens>]) -> Vec<RawClone> {
+fn find_raw_clones(file_data: &[Option<FileTokens>], min_tokens: usize) -> Vec<RawClone> {
     (0..FIND_SHARDS)
         .into_par_iter()
-        .flat_map_iter(|shard| find_raw_clones_shard(file_data, shard))
+        .flat_map_iter(|shard| find_raw_clones_shard(file_data, shard, min_tokens))
         .collect()
 }
 
 /// Sequential scan restricted to windows whose hash lands in `shard`. The
 /// rolling hash is recomputed per shard — a handful of integer ops per
 /// window, far cheaper than sharing materialized hashes across threads.
-fn find_raw_clones_shard(file_data: &[Option<FileTokens>], shard: u64) -> Vec<RawClone> {
+fn find_raw_clones_shard(
+    file_data: &[Option<FileTokens>],
+    shard: u64,
+    min_tokens: usize,
+) -> Vec<RawClone> {
     // Weight of the token leaving the window when rolling one step right, i.e.
-    // `WINDOW_HASH_MULT^(MIN_TOKENS - 1)`.
-    let k_pow: u64 = WINDOW_HASH_MULT.wrapping_pow((MIN_TOKENS - 1) as u32);
+    // `WINDOW_HASH_MULT^(min_tokens - 1)`.
+    let k_pow: u64 = std::iter::repeat_n(WINDOW_HASH_MULT, min_tokens.saturating_sub(1))
+        .fold(1, u64::wrapping_mul);
 
     let mut index: FxHashMap<u64, Vec<Occurrence>> = FxHashMap::default();
     let mut raw: Vec<RawClone> = Vec::new();
 
     for (fi, ft) in file_data.iter().enumerate() {
         let Some(ft) = ft else { continue };
-        if ft.tokens.len() < MIN_TOKENS {
+        if ft.tokens.len() < min_tokens {
             continue;
         }
         // Rabin-Karp rolling hash: hash the first window in full, then derive
         // each subsequent window in O(1) by dropping the outgoing token and
         // folding in the incoming one. Yields the same value as `window_hash`
-        // applied to each window, at ~MIN_TOKENS× less work.
-        let n_windows = ft.tokens.len() - MIN_TOKENS + 1;
-        let mut wh = window_hash(&ft.tokens[0..MIN_TOKENS]);
+        // applied to each window, at ~min_tokens× less work.
+        let n_windows = ft.tokens.len().saturating_sub(min_tokens).saturating_add(1);
+        let mut wh = window_hash(&ft.tokens[0..min_tokens]);
         for start in 0..n_windows {
             if start > 0 {
                 let outgoing = ft.tokens[start - 1].hash;
-                let incoming = ft.tokens[start + MIN_TOKENS - 1].hash;
+                let incoming = ft.tokens[start.saturating_add(min_tokens).saturating_sub(1)].hash;
                 wh = wh
                     .wrapping_sub(outgoing.wrapping_mul(k_pow))
                     .wrapping_mul(WINDOW_HASH_MULT)
@@ -150,7 +154,7 @@ fn find_raw_clones_shard(file_data: &[Option<FileTokens>], shard: u64) -> Vec<Ra
             for occ in bucket.iter() {
                 if occ.file_idx != fi
                     && let Some(ref canon_ft) = file_data[occ.file_idx]
-                    && verify_tokens(ft, start, canon_ft, occ.start_token)
+                    && verify_tokens(ft, start, canon_ft, occ.start_token, min_tokens)
                 {
                     raw.push((
                         fi,
@@ -179,8 +183,14 @@ fn find_raw_clones_shard(file_data: &[Option<FileTokens>], shard: u64) -> Vec<Ra
     raw
 }
 
-fn verify_tokens(a: &FileTokens, a_start: usize, b: &FileTokens, b_start: usize) -> bool {
-    for i in 0..MIN_TOKENS {
+fn verify_tokens(
+    a: &FileTokens,
+    a_start: usize,
+    b: &FileTokens,
+    b_start: usize,
+    min_tokens: usize,
+) -> bool {
+    for i in 0..min_tokens {
         let ta = &a.tokens[a_start + i];
         let tb = &b.tokens[b_start + i];
         if ta.kind_id != tb.kind_id {
@@ -195,15 +205,24 @@ fn verify_tokens(a: &FileTokens, a_start: usize, b: &FileTokens, b_start: usize)
 
 /// Diversity gate. Counts distinct token-text trigrams across the
 /// `[first_tok, last_tok]` range of `ft` (inclusive of the trailing
-/// `MIN_TOKENS`-wide window starting at `last_tok`). Trigrams penalise
+/// `min_tokens`-wide window starting at `last_tok`). Trigrams penalise
 /// repeated subsequences — e.g. a registration table with four
 /// `(Language::X, Backend::TreeSitter(Box::new(typescript::Check)))`
 /// rows yields very few distinct trigrams, while genuine duplicated
 /// logic (each statement carrying fresh identifiers) yields many.
 /// The clone is rejected when the merged span has fewer than
-/// `MIN_DISTINCT_TRIGRAMS` distinct trigrams.
-fn has_enough_distinct_texts(ft: &FileTokens, first_tok: usize, last_window_tok: usize) -> bool {
-    let last_tok = (last_window_tok + MIN_TOKENS - 1).min(ft.tokens.len() - 1);
+/// `min_distinct_trigrams` distinct trigrams.
+fn has_enough_distinct_texts(
+    ft: &FileTokens,
+    first_tok: usize,
+    last_window_tok: usize,
+    min_tokens: usize,
+    min_distinct_trigrams: usize,
+) -> bool {
+    let last_tok = last_window_tok
+        .saturating_add(min_tokens)
+        .saturating_sub(1)
+        .min(ft.tokens.len().saturating_sub(1));
     if last_tok < first_tok + 2 {
         return false;
     }
@@ -216,17 +235,19 @@ fn has_enough_distinct_texts(ft: &FileTokens, first_tok: usize, last_window_tok:
         let tb = &ft.source[b.start_byte..b.end_byte];
         let tc = &ft.source[c.start_byte..c.end_byte];
         seen.insert((ta, tb, tc));
-        if seen.len() >= MIN_DISTINCT_TRIGRAMS {
+        if seen.len() >= min_distinct_trigrams {
             return true;
         }
     }
-    seen.len() >= MIN_DISTINCT_TRIGRAMS
+    seen.len() >= min_distinct_trigrams
 }
 
 fn merge_and_emit(
     raw: &mut Vec<RawClone>,
     file_data: &[Option<FileTokens>],
     files: &[&SourceFile],
+    min_tokens: usize,
+    min_distinct_trigrams: usize,
 ) -> Vec<Diagnostic> {
     if raw.is_empty() {
         return vec![];
@@ -267,9 +288,9 @@ fn merge_and_emit(
             break;
         }
         // Identifier-diversity gate — filters low-entropy boilerplate clones.
-        let keep = file_data[rfi]
-            .as_ref()
-            .is_some_and(|ft| has_enough_distinct_texts(ft, rstart, last_rstart));
+        let keep = file_data[rfi].as_ref().is_some_and(|ft| {
+            has_enough_distinct_texts(ft, rstart, last_rstart, min_tokens, min_distinct_trigrams)
+        });
         if keep {
             spans.push(Span { rfi, rstart, last_rstart, rline, cfi, last_cstart, cline });
         }
@@ -283,10 +304,9 @@ fn merge_and_emit(
     // Phase 2 — suppress symmetric sibling pairs.
     // Eleven suppression criteria, any one is sufficient:
     //
-    // A) Small-gap: the tokens NOT covered by any matching window in the
-    //    reporter file are few (> 0, ≤ SYMMETRIC_SIBLING_GAP_THRESHOLD).  A
-    //    small non-zero gap signals one load-bearing difference surrounded by
-    //    identical structure (e.g. the `.set()` argument between two handlers).
+    // A) Small-gap: few reporter tokens sit outside every window.
+    //    The gap is > 0 and ≤ `sibling_gap_max`.
+    //    It marks one load-bearing difference amid identical structure.
     //
     // B) Named complement: the two files live in the same directory and their
     //    stems form a known domain complement pair (deactivate/reactivate,
@@ -387,6 +407,8 @@ fn merge_and_emit(
             FxHashMap::default();
         let mut package_root_memo: FxHashMap<usize, Option<std::path::PathBuf>> =
             FxHashMap::default();
+        // Criterion A threshold. Half a window, so it scales with `min_tokens`.
+        let sibling_gap_max = min_tokens / 2;
         // Criterion K: re-parsed Rust trees for the test-context check, memoized
         // per file index — a file recurs across many pairs, so it is parsed once.
         let mut rust_parser = Parser::new();
@@ -396,10 +418,15 @@ fn merge_and_emit(
             let total = file_data[*rfi].as_ref().map_or(0, |ft| ft.tokens.len());
             let covered: usize = idxs
                 .iter()
-                .map(|&i| spans[i].last_rstart - spans[i].rstart + MIN_TOKENS)
+                .map(|&i| {
+                    spans[i]
+                        .last_rstart
+                        .saturating_sub(spans[i].rstart)
+                        .saturating_add(min_tokens)
+                })
                 .sum();
             let gap = total.saturating_sub(covered);
-            let small_gap = gap > 0 && gap <= SYMMETRIC_SIBLING_GAP_THRESHOLD;
+            let small_gap = gap > 0 && gap <= sibling_gap_max;
             let name_siblings = gap > 0
                 && are_symmetric_name_pair(&files[*rfi].path, &files[*cfi].path);
             let locale_variants =
@@ -443,8 +470,8 @@ fn merge_and_emit(
                 // `last_cstart` are the final matched window-starts on each side.
                 for &idx in idxs {
                     let s = &spans[idx];
-                    let r_last = s.last_rstart + MIN_TOKENS - 1;
-                    let c_last = s.last_cstart + MIN_TOKENS - 1;
+                    let r_last = s.last_rstart.saturating_add(min_tokens).saturating_sub(1);
+                    let c_last = s.last_cstart.saturating_add(min_tokens).saturating_sub(1);
                     if endpoint_in_rust_test_context(
                         s.rfi,
                         r_last,
@@ -473,7 +500,7 @@ fn merge_and_emit(
         .enumerate()
         .filter(|(idx, _)| !suppressed.contains(idx))
         .map(|(_, s)| {
-            let lines = clone_line_span(file_data, s.rfi, s.rstart, s.last_rstart);
+            let lines = clone_line_span(file_data, s.rfi, s.rstart, s.last_rstart, min_tokens);
             Diagnostic {
                 path: std::sync::Arc::from(files[s.rfi].path.as_path()),
                 line: s.rline,
@@ -529,13 +556,14 @@ fn clone_line_span(
     fi: usize,
     first_tok: usize,
     last_window_tok: usize,
+    min_tokens: usize,
 ) -> usize {
     let Some(ref ft) = file_data[fi] else {
         debug_assert!(false, "clone_line_span called with None file_data[{fi}]");
-        return MIN_TOKENS;
+        return min_tokens;
     };
     let first_line = ft.tokens[first_tok].line;
-    let last_tok_idx = last_window_tok + MIN_TOKENS - 1;
+    let last_tok_idx = last_window_tok.saturating_add(min_tokens).saturating_sub(1);
     let last_line = if last_tok_idx < ft.tokens.len() {
         ft.tokens[last_tok_idx].line
     } else {
@@ -1321,6 +1349,82 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Default `min_tokens`, pinned by `default_config_keeps_the_100_token_window`.
+    const MIN_TOKENS: usize = 100;
+
+    fn lint_files(files: &[&SourceFile]) -> Vec<Diagnostic> {
+        super::lint_files(files, &Config::default())
+    }
+
+    /// Lints `files` under a `comply.toml` in `dir` lowering both thresholds.
+    fn lint_with_lowered_window(dir: &tempfile::TempDir, files: &[&SourceFile]) -> Vec<Diagnostic> {
+        std::fs::write(
+            dir.path().join("comply.toml"),
+            "[rules.no-clones]\nmin_tokens = 20\nmin_distinct_trigrams = 15\n",
+        )
+        .unwrap();
+        super::lint_files(files, &Config::load_from(dir.path()).unwrap())
+    }
+
+    #[test]
+    fn default_config_keeps_the_100_token_window() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.threshold(RULE_ID, "min_tokens", Language::TypeScript),
+            MIN_TOKENS
+        );
+        assert_eq!(
+            cfg.threshold(RULE_ID, "min_distinct_trigrams", Language::TypeScript),
+            145
+        );
+    }
+
+    #[test]
+    fn lowered_window_reports_short_jsx_fragment() {
+        let dir = tempfile::tempdir().unwrap();
+        let fragment = "<section className=\"card\"><h2>{title}</h2>\
+             <p className=\"muted\">{subtitle}</p><Button onClick={onOpen}>Open</Button></section>";
+        let write = |name: &str, tag: &str| {
+            let path = dir.path().join(name);
+            let body = format!(
+                "{}\nexport function {tag}() {{\n  return (\n    {fragment}\n  );\n}}\n",
+                large_ts_block(6).replace("value_", &format!("{tag}_"))
+            );
+            std::fs::write(&path, body).unwrap();
+            SourceFile {
+                path,
+                language: Language::Tsx,
+            }
+        };
+        let header = write("Header.tsx", "header");
+        let footer = write("Footer.tsx", "footer");
+        assert!(lint_files(&[&header, &footer]).is_empty());
+        let diags = lint_with_lowered_window(&dir, &[&header, &footer]);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert_eq!(diags[0].rule_id, RULE_ID);
+    }
+
+    #[test]
+    fn lowered_window_reports_short_rust_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = "pub fn clamp_rgb(c: Rgb) -> Rgb {\n    \
+             Rgb { r: c.r.min(255), g: c.g.min(255), b: c.b.min(255) }\n}\n";
+        let write = |name: &str, tag: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("{}\n\n{shared}", distinct_prod_fn(tag, 6))).unwrap();
+            SourceFile {
+                path,
+                language: Language::Rust,
+            }
+        };
+        let parse = write("parse.rs", "parse");
+        let render = write("render.rs", "render");
+        assert!(lint_files(&[&parse, &render]).is_empty());
+        let diags = lint_with_lowered_window(&dir, &[&parse, &render]);
+        assert_eq!(diags.len(), 1, "got {diags:?}");
+        assert_eq!(diags[0].rule_id, RULE_ID);
+    }
+
     fn make_file(path: &str, lang: Language) -> SourceFile {
         SourceFile {
             path: PathBuf::from(path),
@@ -1654,7 +1758,7 @@ mod tests {
             }),
         ];
 
-        let raw = find_raw_clones(&file_data);
+        let raw = find_raw_clones(&file_data, MIN_TOKENS);
         // File 2 matches file 0, file 1 matches neither.
         assert_eq!(raw.len(), 1);
         let (rfi, _, _, cfi, _, _) = raw[0];
@@ -1726,7 +1830,7 @@ mod tests {
             .collect();
         // Second run: starts after a gap → separate clone, also long enough.
         raw.extend((0..50).map(|k| (0usize, 10 + 50 + k, 20 + 50 + k, 1usize, 50 + k, 80 + k)));
-        let diags = merge_and_emit(&mut raw, &file_data, &file_refs);
+        let diags = merge_and_emit(&mut raw, &file_data, &file_refs, MIN_TOKENS, 145);
         assert_eq!(diags.len(), 2);
     }
 
@@ -1814,11 +1918,6 @@ mod tests {
     #[test]
     fn no_false_positive_on_symmetric_suffix_siblings() {
         // Regression test for issue #338.
-        // deactivate/reactivate handlers share an identical suffix (CTE + JOIN
-        // block) but their setup and UPDATE call differ — the gap is larger
-        // than SYMMETRIC_SIBLING_GAP_THRESHOLD.  Name-based suppression must
-        // kick in because both files live in the same directory and their stems
-        // contain a known complement pair (deactivate / reactivate).
         let dir = tempfile::tempdir().unwrap();
 
         let suffix = large_ts_block(20); // identical in both files
@@ -2091,7 +2190,7 @@ mod tests {
         // Shared structure (the localize boilerplate) plus a large block of
         // locale-specific strings (months, weekdays, …) that differ entirely
         // between the two locales. The differing block is wide enough that the
-        // uncovered-token gap exceeds SYMMETRIC_SIBLING_GAP_THRESHOLD, so the
+        // uncovered-token gap exceeds sibling_gap_max, so the
         // small-gap criterion does not apply — only the locale-variant rule can
         // suppress this pair.
         let shared = large_ts_block(20);

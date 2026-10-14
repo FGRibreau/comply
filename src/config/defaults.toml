@@ -289,6 +289,13 @@ prefix_pct = 0.25
 [rules.no-duplicate-function]
 min_body_tokens = 10
 
+# Cross-file token clones, all languages. `min_tokens` is the window width.
+# `min_distinct_trigrams` drops low-entropy runs like registration tables.
+# Lower both to catch short repeated constants or JSX fragments.
+[rules.no-clones]
+min_tokens = 100
+min_distinct_trigrams = 145
+
 # Cross-program structurally-identical named object types (a copy-paste smell).
 # `min_properties` is the minimum number of resolved properties a shape must have
 # before two identical shapes are called a consolidation target. Small shapes

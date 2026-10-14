@@ -516,6 +516,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[should_panic(expected = "[rules.\"no-clones\"] min_distinct_trigrams")]
+    fn no_clones_panics_naming_missing_key() {
+        let raw: ComplyToml = toml::from_str("[rules.no-clones]\nmin_tokens = 100\n").unwrap();
+        let cfg = Config::from_raw(raw).unwrap();
+        let _ = crate::clone_detection::lint_files(&[], &cfg);
+    }
+
+    #[test]
     fn default_config_returns_known_thresholds() {
         let cfg = Config::default();
         assert_eq!(cfg.threshold("max-function-lines", "max", Language::TypeScript), 30);
