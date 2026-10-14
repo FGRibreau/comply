@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2058 rules across 152 categories.
 
 ## Categories
 
@@ -1870,7 +1870,7 @@
 | `rust-eprintln-in-library` | `eprintln!` / `eprint!` invoked from library code. | Library code shouldn't write to stderr directly — consumers can't redirect, configure, or capture it. Use `tracing::warn!` / `tracing::error!` so the consumer's subscriber controls the output. |
 | `rust-error-variant-stringly` | Error enum variant carries a `String` or a catch-all payload instead of typed fields. | Give the variant the fields the caller needs to act on: `SchemaMismatch { expected: Type, got: Type }` instead of `Other(String)` or `InvalidSchema(String)`. When the variant only forwards another error, name that error and let thiserror wire it: `Io(#[from] std::io::Error)`. Where `rust-string-as-error` rejects `Result<T, String>` for having no error type at all, this rule rejects an error type whose variants carry no information. |
 | `rust-expect-over-allow` | Suppress lints with `#[expect(…)]`, not `#[allow(…)]`. | Replace `#[allow(lint)]` with `#[expect(lint, reason = "…")]`. `#[expect]` fails the build the day the warning it suppresses disappears, so the suppression dies with the problem; an `#[allow]` outlives it and silently covers the next offender that lands under it. Keep `#[allow]` only where the lint fires conditionally (a `cfg`-gated build, a generated file) and `#[expect]` would itself warn. Enforced by `clippy::allow_attributes`. |
-| `rust-explicit-enum-match-arms` | Wildcard `_` arm on a `match` that looks like it covers an enum. | Replace `_ => …` with the remaining variants explicitly (`Foo::A \| Foo::B => …`). The compile error on enum expansion is the whole point: it forces you to consciously handle each new case. |
+| `rust-explicit-enum-match-arms` | Wildcard `_` arm on a `match` over an enum declared in the Cargo workspace. | Replace `_ => …` with the remaining variants explicitly (`Foo::A \| Foo::B => …`). The compile error on enum expansion is the whole point: it forces you to consciously handle each new case. |
 | `rust-explicit-iter-loop` | Use iterator chains, not raw index loops. | Replace `for i in 0..vec.len() { vec[i] }` with `for x in &vec`. Iterator chains let the compiler vectorize the loop body and eliminate bounds checks. Enable `clippy::needless_range_loop` and `clippy::explicit_iter_loop`. |
 | `rust-hash-partial-eq-mismatch` | `Hash` and `PartialEq` are not implemented consistently (one derived, the other manual). | If two values are equal (`a == b`) they MUST produce the same hash. Mixing a derived `Hash` with a manual `PartialEq` (or vice versa) almost always breaks that invariant. Either derive both or implement both manually with care to keep them in sync. |
 | `rust-if-let-mutex-lock` | `if let ... = mtx.lock()` extends the lock guard's lifetime to cover the `else` branch. | Temporaries created in the scrutinee of `if let` live for the entire `if/else` expression. Hold the guard in a separate `let` binding so the lock is released before the `else` branch runs, or use `match` with explicit `drop()` calls. |

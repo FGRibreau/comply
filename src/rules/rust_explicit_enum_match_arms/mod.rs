@@ -27,18 +27,9 @@
 //! rather than false positives (flagging a `match` on a scalar type
 //! where `_` is genuinely necessary).
 //!
-//! Stdlib exemption: when every enum-like arm references a known
-//! stdlib closed or non_exhaustive enum — `Result` (`Ok`/`Err`),
-//! `Option` (`Some`/`None`), or `std::io::ErrorKind` — the match is
-//! not flagged. All arms of a `match` share one type, so this is a
-//! sound syntactic proxy for "the scrutinee is a stdlib type". The
-//! wildcard is idiomatic on Result/Option (stable, closed, two
-//! variants) and compiler-mandated on `#[non_exhaustive]` enums like
-//! `ErrorKind`. A glob or brace import (`use std::io::ErrorKind::*;`,
-//! `use std::io::ErrorKind::{NotFound, ..};`) strips the qualifier; bare
-//! variant heads are then recognized as ErrorKind when the file carries such
-//! an import and the head names a known ErrorKind variant. Project-defined
-//! enums still require explicit arms.
+//! Workspace scope: only enums declared in the Cargo workspace count.
+//! Stdlib, dependency and ambiguous enums never flag.
+//! Nor do cross-crate `#[non_exhaustive]` enums.
 //!
 //! Variant-accessor exemption: a `_ => None` arm paired with at least one
 //! `Variant(v) => Some(v)` arm is the idiomatic "extract this variant, else
@@ -48,11 +39,9 @@
 //! cfg-gated-enum exemption: when the scrutinee enum has a `#[cfg(...)]`-gated
 //! variant, its variant set is target-dependent. Listing every variant
 //! explicitly fails to compile on the target that excludes the gated variant, so
-//! the wildcard `_` is the portable, compiler-required way to match it. The enum
-//! name is read from the qualified arm patterns (`Addr::SocketAddr` → `Addr`)
-//! and matched against this file's `enum_item` definitions, then against the
-//! enclosing crate's — an enum declared in a sibling file resolves too. A
-//! wildcard arm carrying its own `#[cfg(...)]` / `#[cfg_attr(...)]` attribute is
+//! the wildcard `_` is the portable, compiler-required way to match it.
+//! Each arm's enum, bare variants included, resolves through imports. A wildcard
+//! arm carrying its own `#[cfg(...)]` / `#[cfg_attr(...)]` attribute is
 //! exempt for the same reason.
 //!
 //! cxx::bridge-enum exemption: when the scrutinee enum is declared inside a
@@ -76,7 +65,7 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "rust-explicit-enum-match-arms",
-    description: "Wildcard `_` arm on a `match` that looks like it covers an enum.",
+    description: "Wildcard `_` arm on a `match` over an enum declared in the Cargo workspace.",
     remediation: "Replace `_ => …` with the remaining variants explicitly \
                   (`Foo::A | Foo::B => …`). The compile error on enum expansion \
                   is the whole point: it forces you to consciously handle each \
