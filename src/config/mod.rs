@@ -585,6 +585,29 @@ mod tests {
     }
 
     #[test]
+    fn type_safety_rules_are_opt_in() {
+        let ids = [
+            "no-chained-type-assertions",
+            "no-widen-then-assert",
+            "require-safety-comment-for-type-assertion",
+            "no-unknown-parameters",
+            "no-unsafe-dictionary-type",
+            "no-runtime-typeof",
+            "no-known-value-widening",
+        ];
+        let defaults = Config::default();
+        assert!(ids.iter().all(|id| defaults.is_rule_globally_disabled(id)));
+        let project_dir = TempDir::new().unwrap();
+        let enabled: String = ids
+            .iter()
+            .map(|id| format!("[rules.{id}]\ndisabled = false\n"))
+            .collect();
+        fs::write(project_dir.path().join("comply.toml"), enabled).unwrap();
+        let cfg = Config::load_from(project_dir.path()).unwrap();
+        assert!(ids.iter().all(|id| !cfg.is_rule_globally_disabled(id)));
+    }
+
+    #[test]
     #[should_panic(expected = "is missing")]
     fn threshold_panics_when_key_missing() {
         let cfg = Config::default();

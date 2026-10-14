@@ -15,6 +15,7 @@
 //! - [`run_oxc_rule_with_toml`] — an oxc rule under a project `comply.toml`
 //! - [`run_rule_gated`] — applies the production `applies_to_file` gate
 //! - [`run_rule_by_id`] — look up rule by string ID (for integration tests)
+//! - [`run_oxc_check_with_config`] — an OXC check under a project `comply.toml`
 
 #![cfg(test)]
 
@@ -110,6 +111,29 @@ fn run_oxc_check_in(check: &dyn OxcCheck, ctx: &CheckCtx) -> Vec<Diagnostic> {
         }
     }
     diagnostics
+}
+
+/// Run an OxcCheck on TypeScript `src` under a project `comply.toml`.
+#[must_use]
+pub fn run_oxc_check_with_config(
+    check: &dyn OxcCheck,
+    src: &str,
+    comply_toml: &str,
+) -> Vec<Diagnostic> {
+    let project_dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(project_dir.path().join("comply.toml"), comply_toml).expect("write cfg");
+    let config = crate::config::Config::load_from(project_dir.path()).expect("load cfg");
+    let path = Path::new("t.ts");
+    let ctx = CheckCtx {
+        path,
+        path_arc: std::sync::Arc::from(path),
+        source: src,
+        config: &config,
+        project: crate::project::default_static_project_ctx(),
+        file: crate::rules::file_ctx::default_static_file_ctx(),
+        lang: Language::TypeScript,
+    };
+    run_oxc_check_in(check, &ctx)
 }
 
 /// Run a rule against `src`, using the language inferred from `path`.

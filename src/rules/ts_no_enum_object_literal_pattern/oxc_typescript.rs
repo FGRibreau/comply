@@ -2,7 +2,7 @@
 //! Flags `Color[someVar]` where `Color` is declared `as const`.
 
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::oxc_helpers::{byte_offset_to_line_col, peel_parens};
+use crate::oxc_helpers::{byte_offset_to_line_col, is_const_assertion, peel_parens};
 use crate::rules::backend::{AstKind, AstType, CheckCtx, OxcCheck};
 use oxc_ast::ast::{
     ArrayExpressionElement, BindingPattern, CallExpression, Expression, FormalParameter,
@@ -109,12 +109,6 @@ fn object_literal_keys<'a>(obj: &'a ObjectExpression<'a>) -> FxHashSet<&'a str> 
         }
     }
     keys
-}
-
-/// True when `ty` is the asserted type of an `expr as const` expression. The
-/// parser models the `const` assertion as a reference to a type named `const`.
-fn is_const_assertion(ty: &TSType) -> bool {
-    type_ref_name(ty) == Some("const")
 }
 
 /// True when `ty` is an object-literal type with a closed set of named keys — a
