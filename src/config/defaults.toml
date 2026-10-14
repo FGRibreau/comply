@@ -464,7 +464,7 @@ max_letter_spacing_em = 0.05
 #   allow_regex = "^shadow-card$" # unset: no exemption
 #   variant = []                  # set: only classes under one of these
 #   unless_variant = []           # classes under one of these pass
-#   context = "iteration-callback" # unset: everywhere
+#   context = "iteration-callback" # or "conditional"; unset: everywhere
 #   requires = "^motion-reduce:"  # unset: no exemption
 #   message = "Use the design-system shadow."
 [rules.tailwind-no-restricted-classes]
@@ -513,6 +513,16 @@ entries = []
 #   message = "Use the spring tokens." # unset: names key and context
 [rules.no-restricted-object-keys]
 entries = []
+
+# Arbitrary colours (`bg-[#fff]`), white/black and `style` colour literals.
+[rules.tailwind-no-raw-color-utilities]
+arbitrary_colors = false
+absolute_colors = false
+style_objects = false
+
+# Appended to the message, e.g. the project's layout-animation component.
+[rules.tailwind-no-transition-all-layout]
+hint = ""
 
 # Opt-in required-scripts check for package.json. Empty by default — the rule
 # is a no-op until a project lists the npm scripts it expects every package to

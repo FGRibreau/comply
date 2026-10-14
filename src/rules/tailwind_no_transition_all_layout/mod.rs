@@ -1,8 +1,7 @@
-//! tailwind-no-transition-all-layout — forbid combining `transition-all`
-//! with layout properties (width, height, top, left, right, bottom). These
-//! trigger layout on every frame of the animation, causing jank. Prefer
-//! `transition-transform` or `transition-opacity`, which the compositor can
-//! handle without layout.
+//! tailwind-no-transition-all-layout — flag transitions that can animate layout.
+//!
+//! Flags `transition-all`, or `transition-[…]` naming a layout property.
+//! `hint` is appended to the message; defaults: `src/config/defaults.toml`.
 
 mod oxc_typescript;
 
@@ -14,7 +13,7 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "tailwind-no-transition-all-layout",
-    description: "Forbid `transition-all` with width/height/top/left utilities — causes layout thrash.",
+    description: "Forbid `transition-all` and `transition-[…]` on a layout property (width, height, inset, margin, padding) in every class string — causes layout thrash.",
     remediation: "Animate via `translate-*` + `transition-transform` or `opacity-*` + `transition-opacity`. These are composited and never trigger layout.",
     severity: Severity::Error,
     doc_url: None,

@@ -1,8 +1,8 @@
-//! tailwind-no-raw-color-utilities — flag raw palette colors
-//! (`bg-white`, `text-gray-900`, `bg-blue-500`) inside a component's
-//! `className`. Components should consume semantic design tokens
-//! (`bg-background`, `text-foreground`, `bg-primary`) so dark mode and
-//! theming work without per-element `dark:` variants.
+//! tailwind-no-raw-color-utilities — flag raw palette colours in class strings.
+//!
+//! Reads every class string: `className`, `cn`-style helpers, their constants.
+//! Opt-in keys add arbitrary colours, white/black and `style` literals.
+//! Keys and defaults: `src/config/defaults.toml`.
 
 mod oxc_typescript;
 
@@ -14,7 +14,7 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "tailwind-no-raw-color-utilities",
-    description: "Forbid raw palette color utilities (bg-white, text-gray-900, bg-blue-500).",
+    description: "Forbid raw palette color utilities (text-gray-900, bg-blue-500) in every class string; opt-in keys add arbitrary colors (bg-[#fff]), white/black and color literals in `style` objects.",
     remediation: "Use semantic design tokens (bg-background, text-foreground, bg-primary, text-muted-foreground) so theming and dark mode stay centralized.",
     severity: Severity::Error,
     doc_url: None,
