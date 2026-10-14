@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2059 rules across 152 categories.
 
 ## Categories
 
@@ -114,7 +114,7 @@
 - [rust > security](#rust-security) (2 rules)
 - [rust > serde](#rust-serde) (1 rules)
 - [rust > testing](#rust-testing) (2 rules)
-- [security](#security) (65 rules)
+- [security](#security) (66 rules)
 - [security > api-design](#security-api-design) (1 rules)
 - [security > code-quality](#security-code-quality) (3 rules)
 - [security > regex](#security-regex) (2 rules)
@@ -2024,6 +2024,7 @@
 | `detect-option-rejectunauthorized` | `rejectUnauthorized: false` disables TLS certificate validation. | Remove the option (it defaults to `true`) or set it to `true`. Disabling certificate validation makes the connection vulnerable to MITM attacks. |
 | `express-session-require-name` | `session({...})` config is missing the `name` property — the default session cookie name is predictable. | Add name property to session config to avoid default session name |
 | `mysql-no-multiple-statements` | `multipleStatements: true` on mysql connections amplifies SQL injection risk. | Don't enable multipleStatements, it amplifies SQL injection risk. |
+| `nginx-add-header-always` | nginx `add_header` directive without the `always` flag. | End the directive with `always`, e.g. `add_header X-Frame-Options DENY always;`. Without it, nginx omits the header on 4xx and 5xx responses. |
 | `no-auth-token-in-localstorage` | Auth tokens in localStorage are XSS-exfiltratable. | Store auth tokens in httpOnly cookies. The browser attaches them automatically and JavaScript cannot read them, so a successful XSS can't steal the session. |
 | `no-bidi-characters` | Invisible Unicode bidi control characters can be used in trojan-source attacks to disguise malicious code. | Remove the bidi control character. If directional formatting is needed, use visible markup instead. |
 | `no-clear-text-protocol` | Clear-text protocol detected — use the encrypted equivalent. | Replace http:// with https://, ftp:// with sftp://, telnet:// with ssh://. Clear-text protocols transmit data in the open. |

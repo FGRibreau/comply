@@ -46,6 +46,25 @@ fn multiple_violations_are_all_reported() {
 }
 
 #[test]
+fn nginx_add_header_without_always_is_reported_only_in_nginx_files() {
+    let dir = tempfile::TempDir::new().unwrap();
+    for sub in ["nginx", "app"] {
+        std::fs::create_dir(dir.path().join(sub)).unwrap();
+        std::fs::write(
+            dir.path().join(sub).join("site.conf"),
+            "add_header X DENY;\n",
+        )
+        .unwrap();
+    }
+    common::comply()
+        .arg(dir.path())
+        .assert()
+        .stdout(predicate::str::contains("nginx-add-header-always"))
+        .stdout(predicate::str::contains("nginx/site.conf"))
+        .stdout(predicate::str::contains("app/site.conf").not());
+}
+
+#[test]
 fn homemade_async_state_is_reported() {
     let source = "export type Status = \"idle\" | \"loading\" | \"error\";\n";
     let (_dir, path) = write_ts_file("status.ts", source);
