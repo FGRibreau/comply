@@ -18,17 +18,18 @@ use crate::project::import_index::collect_pattern_names;
 pub const RULE_ID: &str = "no-duplicate-function";
 
 fn is_target_language(lang: Language) -> bool {
-    matches!(lang, Language::TypeScript | Language::Tsx | Language::JavaScript)
+    matches!(
+        lang,
+        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Rust
+    )
 }
 
 fn is_comment_kind(kind: &str) -> bool {
     matches!(kind, "comment" | "line_comment" | "block_comment")
 }
 
-/// Whether two files belong to different npm packages, i.e. their nearest
-/// `package.json` directories are both known and distinct. Two files with no
-/// manifest, or sharing one, are treated as the same package (the conservative
-/// default keeps the duplicate reportable).
+/// Whether two files sit under distinct known manifest directories.
+/// No manifest, or a shared one, means one package.
 fn are_different_packages(a: Option<&std::path::Path>, b: Option<&std::path::Path>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if a != b)
 }
@@ -48,10 +49,14 @@ fn any_divergent_import_source(
     })
 }
 
-/// Whether a module specifier is *relative* (`./…` or `../…`), i.e. names a file
-/// under the importing package rather than an installed dependency.
+/// Whether a specifier resolves inside the importing package or crate.
 fn is_relative_specifier(spec: Option<&String>) -> bool {
-    spec.is_some_and(|s| s.starts_with('.'))
+    spec.is_some_and(|s| {
+        s.starts_with('.')
+            || s.starts_with("crate::")
+            || s.starts_with("self::")
+            || s.starts_with("super::")
+    })
 }
 
 /// Whether either body name imports a relative module specifier.
@@ -217,16 +222,19 @@ pub fn lint_files(
         return vec![];
     }
 
-    // The nearest `package.json` directory of each file, for the cross-package
-    // exemption below. Computed once per file (one walk-up) so the report loop
-    // is a pointer compare. This runs concurrently with `ProjectCtx::load`, so
-    // it cannot use the project's cached accessor.
+    // Nearest crate or package manifest, one walk-up per file.
+    // This runs beside `ProjectCtx::load`: no cached accessor.
     let package_dirs: Vec<Option<std::path::PathBuf>> = files
         .iter()
         .map(|f| {
+            let manifest = if f.language == Language::Rust {
+                "Cargo.toml"
+            } else {
+                "package.json"
+            };
             f.path
                 .parent()
-                .and_then(|dir| crate::project::walk_up_finding(dir, "package.json"))
+                .and_then(|dir| crate::project::walk_up_finding(dir, manifest))
         })
         .collect();
 
@@ -322,8 +330,11 @@ pub fn lint_files(
             // import" is not actionable. Exported duplicates still flag — there
             // hoisting to a shared package is the right fix — and same-package
             // private duplicates still flag, where a local import is trivial.
-            if !entry.is_exported
-                && !canonical.is_exported
+            let is_rust = |e: &FnEntry| files[e.file_idx].language == Language::Rust;
+            // A private Rust helper stays hoistable into a shared crate.
+            let has_rust = is_rust(entry) || is_rust(canonical);
+            let is_private_js_pair = !entry.is_exported && !canonical.is_exported && !has_rust;
+            if is_private_js_pair
                 && are_different_packages(
                     package_dirs[entry.file_idx].as_deref(),
                     package_dirs[canonical.file_idx].as_deref(),
@@ -444,11 +455,21 @@ fn extract_functions(
     // function's body, decided during the walk while the parent chain is at hand.
     let mut entries: Vec<(FnEntry, bool)> = Vec::new();
     let mut import_map = FxHashMap::default();
+    if file.language == Language::Rust {
+        // Inline `crate::`/`super::` paths read as crate-relative imports.
+        import_map.insert("crate".to_string(), "crate::".to_string());
+        import_map.insert("super".to_string(), "super::".to_string());
+    }
     let mut cursor = tree.walk();
     'walk: loop {
         let node = cursor.node();
         if node.kind() == "import_statement" {
             collect_import(node, bytes, &mut import_map);
+        }
+        if node.kind() == "use_declaration"
+            && let Some(argument) = node.child_by_field_name("argument")
+        {
+            collect_use(argument, "", bytes, &mut import_map);
         }
         if let Some((name, decl, sig_node, body)) = named_function_parts(node) {
             if let Some(entry) =
@@ -505,11 +526,19 @@ fn extract_functions(
 /// skipped). Only direct children of the program are scanned, so a binding
 /// nested inside a function body — which cannot collide with another file's
 /// top-level name — is ignored.
+/// A Rust `fn` counts only without `pub`.
 fn collect_module_local_decls(root: Node, source: &[u8], out: &mut FxHashMap<String, Vec<u8>>) {
     let mut cursor = root.walk();
     for child in root.named_children(&mut cursor) {
         match child.kind() {
             "function_declaration" => insert_decl_fingerprint(child, source, out),
+            "function_item"
+                if !child
+                    .named_children(&mut child.walk())
+                    .any(|c| c.kind() == "visibility_modifier") =>
+            {
+                insert_decl_fingerprint(child, source, out);
+            }
             "lexical_declaration" | "variable_declaration" => {
                 let mut inner = child.walk();
                 for declarator in child.named_children(&mut inner) {
@@ -527,6 +556,7 @@ fn collect_module_local_decls(root: Node, source: &[u8], out: &mut FxHashMap<Str
 /// binding-kind rule that selects entries also selects module-local callees;
 /// other declarators (e.g. `const MAX = 5`, a destructuring pattern) carry no
 /// callee that can diverge under a shared name and are skipped.
+/// A Rust `function_item` is a named function form too.
 fn insert_decl_fingerprint(node: Node, source: &[u8], out: &mut FxHashMap<String, Vec<u8>>) {
     let Some((name, _, sig_node, body)) = named_function_parts(node) else {
         return;
@@ -598,6 +628,46 @@ fn insert_local(id: Node, source: &[u8], specifier: &str, map: &mut FxHashMap<St
     }
 }
 
+/// Record each name a Rust `use` binds, with its path.
+fn collect_use(node: Node, prefix: &str, source: &[u8], map: &mut FxHashMap<String, String>) {
+    let full_path = |path: Node| {
+        let text = path.utf8_text(source).unwrap_or("");
+        if prefix.is_empty() {
+            text.to_string()
+        } else {
+            format!("{prefix}::{text}")
+        }
+    };
+    match node.kind() {
+        "identifier" | "scoped_identifier" => {
+            let local = node.child_by_field_name("name").unwrap_or(node);
+            insert_local(local, source, &full_path(node), map);
+        }
+        "use_as_clause" => {
+            if let (Some(path), Some(alias)) = (
+                node.child_by_field_name("path"),
+                node.child_by_field_name("alias"),
+            ) {
+                insert_local(alias, source, &full_path(path), map);
+            }
+        }
+        "scoped_use_list" => {
+            let nested = node
+                .child_by_field_name("path")
+                .map_or_else(|| prefix.to_string(), full_path);
+            if let Some(list) = node.child_by_field_name("list") {
+                collect_use(list, &nested, source, map);
+            }
+        }
+        "use_list" => {
+            for child in node.named_children(&mut node.walk()) {
+                collect_use(child, prefix, source, map);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The unquoted module specifier of an `import` statement — its `string` child.
 fn import_specifier_text(node: Node, source: &[u8]) -> Option<String> {
     let str_node = node
@@ -610,16 +680,12 @@ fn import_specifier_text(node: Node, source: &[u8]) -> Option<String> {
     )
 }
 
-/// The `(name, declaration, signature node, body)` of a named function at
-/// `node`, for the two forms in scope: a `function foo() {…}` declaration, and a
-/// `const foo = …` binding whose value is an arrow or function expression. The
-/// signature node carries the `parameters` and `return_type` fields (the
-/// declaration itself for a `function_declaration`, the value expression for a
-/// binding). Overload signatures and ambient declarations carry no `body` field
-/// and so are skipped.
+/// The `(name, declaration, signature node, body)` of a named function.
+/// Forms: TS `function` declarations and `const` bindings, Rust `fn` items.
+/// Bodiless forms are skipped.
 fn named_function_parts<'a>(node: Node<'a>) -> Option<(Node<'a>, Node<'a>, Node<'a>, Node<'a>)> {
     match node.kind() {
-        "function_declaration" => {
+        "function_declaration" | "function_item" => {
             let name = node.child_by_field_name("name")?;
             let body = node.child_by_field_name("body")?;
             Some((name, node, node, body))
@@ -643,6 +709,7 @@ fn named_function_parts<'a>(node: Node<'a>) -> Option<(Node<'a>, Node<'a>, Node<
 /// Token fingerprint of type parameters, parameters, return type and body.
 /// Names in `bound` become first-use ranks; empty means exact.
 /// Returns it with the body token count.
+/// A method's `impl` or trait header comes first.
 fn signature_fingerprint(
     sig_node: Node,
     body: Node,
@@ -652,6 +719,25 @@ fn signature_fingerprint(
     let mut signature = Vec::new();
     let mut seen = Vec::new();
     let mut head_count = 0;
+    let owner = sig_node
+        .parent()
+        .filter(|list| list.kind() == "declaration_list")
+        .and_then(|list| list.parent())
+        .filter(|owner| matches!(owner.kind(), "impl_item" | "trait_item"));
+    if let Some(owner) = owner {
+        for child in owner.children(&mut owner.walk()) {
+            if child.kind() != "declaration_list" {
+                collect_body_tokens(
+                    child,
+                    source,
+                    bound,
+                    &mut seen,
+                    &mut signature,
+                    &mut head_count,
+                );
+            }
+        }
+    }
     for field in ["type_parameters", "parameters", "return_type"] {
         if let Some(head) = sig_node.child_by_field_name(field) {
             collect_body_tokens(
@@ -691,10 +777,12 @@ fn collect_bound_names(sig_node: Node, source: &[u8], out: &mut Vec<String>) {
         let binding = match node.kind() {
             "variable_declarator"
             | "function_declaration"
+            | "function_item"
             | "function_expression"
             | "generator_function"
             | "generator_function_declaration" => node.child_by_field_name("name"),
             "arrow_function" | "catch_clause" => node.child_by_field_name("parameter"),
+            "let_declaration" | "for_expression" => node.child_by_field_name("pattern"),
             // `for (x of xs)` without `const` assigns an outer name.
             "for_in_statement" if node.child_by_field_name("kind").is_some() => {
                 node.child_by_field_name("left")
@@ -739,6 +827,9 @@ fn build_entry(
     if let Some(params) = sig_node.child_by_field_name("parameters") {
         collect_identifiers(params, source, &mut params_idents);
     }
+    // A path root in a parameter type binds nothing.
+    params_idents.remove("crate");
+    params_idents.remove("super");
     let mut body_idents = FxHashSet::default();
     collect_identifiers(body, source, &mut body_idents);
     body_idents.retain(|n| !params_idents.contains(n));
@@ -761,7 +852,12 @@ fn build_entry(
 /// accesses (`property_identifier`) and type references (`type_identifier`) are
 /// distinct node kinds and so are not collected.
 fn collect_identifiers(node: Node, source: &[u8], out: &mut FxHashSet<String>) {
-    if node.kind() == "identifier" {
+    // A Rust path root names the crate-relative import key.
+    let is_path_root = matches!(node.kind(), "crate" | "super")
+        && node
+            .parent()
+            .is_some_and(|p| matches!(p.kind(), "scoped_identifier" | "scoped_type_identifier"));
+    if node.kind() == "identifier" || is_path_root {
         if let Ok(text) = node.utf8_text(source)
             && !text.is_empty()
         {
@@ -1300,13 +1396,271 @@ function toOption(e: ScopeEntity): Option {
     }
 
     #[test]
-    fn rust_not_flagged() {
-        // Rust is out of scope for v1 — no-clones covers it.
+    fn rust_fn_copied_across_crates_is_flagged() {
+        // Issue #8476: this `pool()` sat in 27 test crates.
         let dir = tempfile::tempdir().unwrap();
-        let f = "pub fn cell_to_string(cell: &str) -> String {\n    if cell.is_empty() { return String::new(); }\n    cell.trim().to_string()\n}\n";
-        let a = write(&dir, "a.rs", f);
-        let b = write(&dir, "b.rs", f);
-        assert!(run(&[&a, &b]).is_empty(), "Rust functions are not in scope");
+        let pool = "\
+async fn pool() -> PgPool {
+    let url = std::env::var(\"DATABASE_URL\").expect(\"DATABASE_URL set for integration tests\");
+    let pool = PgPool::connect(&url).await.expect(\"connect\");
+    sqlx::migrate!(\"../../migrations\")
+        .run(&pool)
+        .await
+        .expect(\"migrate\");
+    pool
+}
+";
+        write(&dir, "libs/a/Cargo.toml", "");
+        write(&dir, "libs/b/Cargo.toml", "");
+        let a = write(&dir, "libs/a/tests/db.rs", pool);
+        let b = write(&dir, "libs/b/tests/db.rs", pool);
+        let diags = run(&[&a, &b]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(*diags[0].path, *b.path);
+        assert!(diags[0].message.starts_with("Duplicate function `pool`"));
+        assert!(diags[0].message.contains("libs/a/tests/db.rs"));
+    }
+
+    #[test]
+    fn rust_impl_method_copy_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "\
+impl Store {
+    fn load(&self, key: &str) -> Option<String> {
+        let guard = self.map.lock().unwrap();
+        let value = guard.get(key).cloned();
+        value.filter(|v| !v.is_empty())
+    }
+}
+";
+        let a = write(&dir, "a.rs", src);
+        let b = write(&dir, "b.rs", src);
+        let diags = run(&[&a, &b]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(*diags[0].path, *b.path);
+    }
+
+    #[test]
+    fn rust_same_method_in_impls_of_different_types_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(
+            &dir,
+            "a.rs",
+            "\
+impl fmt::Display for A {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, \"{}-{}\", self.id, self.name)
+    }
+}
+",
+        );
+        let b = write(
+            &dir,
+            "b.rs",
+            "\
+impl fmt::Display for B {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, \"{}-{}\", self.id, self.name)
+    }
+}
+",
+        );
+        assert!(run(&[&a, &b]).is_empty());
+    }
+
+    const USE_CRATE_CALLER: &str = "\
+use crate::db::helper;
+
+fn run_query(id: u32) -> u32 {
+    let first = helper(id);
+    let second = helper(first + 1);
+    first + second + id
+}
+";
+
+    #[test]
+    fn rust_use_crate_callee_across_crates_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "libs/a/Cargo.toml", "");
+        write(&dir, "libs/b/Cargo.toml", "");
+        let a = write(&dir, "libs/a/src/q.rs", USE_CRATE_CALLER);
+        let b = write(&dir, "libs/b/src/q.rs", USE_CRATE_CALLER);
+        assert!(run(&[&a, &b]).is_empty());
+    }
+
+    #[test]
+    fn rust_inline_crate_path_across_crates_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "libs/a/Cargo.toml", "");
+        write(&dir, "libs/b/Cargo.toml", "");
+        let caller = "\
+fn run_query(id: u32) -> u32 {
+    let first = crate::db::helper(id);
+    let second = crate::db::helper(first + 1);
+    first + second + id
+}
+";
+        let a = write(&dir, "libs/a/src/q.rs", caller);
+        let b = write(&dir, "libs/b/src/q.rs", caller);
+        assert!(run(&[&a, &b]).is_empty());
+    }
+
+    #[test]
+    fn rust_crate_struct_literal_across_crates_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "libs/a/Cargo.toml", "");
+        write(&dir, "libs/b/Cargo.toml", "");
+        let caller = "\
+fn make(id: u32) -> u32 {
+    let cfg = crate::Config { id, retries: 3 };
+    cfg.id + cfg.retries + id
+}
+";
+        let a = write(&dir, "libs/a/src/q.rs", caller);
+        let b = write(&dir, "libs/b/src/q.rs", caller);
+        assert!(run(&[&a, &b]).is_empty());
+    }
+
+    #[test]
+    fn rust_crate_typed_param_keeps_body_guard() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "libs/a/Cargo.toml", "");
+        write(&dir, "libs/b/Cargo.toml", "");
+        let caller = "\
+fn run_query(p: &crate::db::Pool, id: u32) -> u32 {
+    let first = crate::db::helper(p, id);
+    first + id + 1
+}
+";
+        let a = write(&dir, "libs/a/src/q.rs", caller);
+        let b = write(&dir, "libs/b/src/q.rs", caller);
+        assert!(run(&[&a, &b]).is_empty());
+    }
+
+    #[test]
+    fn rust_use_crate_callee_within_one_crate_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "libs/a/Cargo.toml", "");
+        let a = write(&dir, "libs/a/src/q1.rs", USE_CRATE_CALLER);
+        let b = write(&dir, "libs/a/src/q2.rs", USE_CRATE_CALLER);
+        let diags = run(&[&a, &b]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
+    #[test]
+    fn rust_copy_without_manifest_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = "\
+fn total(items: &[u32]) -> u32 {
+    let mut sum = 0;
+    for item in items {
+        sum += item * 2;
+    }
+    sum
+}
+";
+        let a = write(&dir, "a.rs", src);
+        let b = write(&dir, "b.rs", src);
+        let diags = run(&[&a, &b]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(*diags[0].path, *b.path);
+    }
+
+    #[test]
+    fn rust_divergent_use_path_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "\
+fn open(url: &str) -> Conn {
+    let conn = connect(url);
+    conn.set_timeout(30);
+    conn
+}
+";
+        let a = write(&dir, "a.rs", &format!("use a::connect;\n\n{body}"));
+        let b = write(&dir, "b.rs", &format!("use b::connect;\n\n{body}"));
+        assert!(run(&[&a, &b]).is_empty());
+    }
+
+    #[test]
+    fn rust_divergent_private_callee_not_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir, "libs/a/Cargo.toml", "");
+        write(&dir, "libs/b/Cargo.toml", "");
+        let caller = "\
+fn compute(id: u32) -> u32 {
+    let first = helper();
+    let second = helper() + id;
+    first + second + id
+}
+";
+        let a = write(
+            &dir,
+            "libs/a/src/c.rs",
+            &format!("{caller}\nfn helper() -> u32 {{\n    1\n}}\n"),
+        );
+        let b = write(
+            &dir,
+            "libs/b/src/c.rs",
+            &format!("{caller}\nfn helper() -> u32 {{\n    2\n}}\n"),
+        );
+        assert!(run(&[&a, &b]).is_empty());
+    }
+
+    #[test]
+    fn rust_renamed_copy_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(
+            &dir,
+            "a.rs",
+            "\
+fn load_rows(limit: usize) -> Vec<u32> {
+    let rows = fetch_all();
+    rows.into_iter().take(limit).collect()
+}
+",
+        );
+        let b = write(
+            &dir,
+            "b.rs",
+            "\
+fn fetch_rows(max: usize) -> Vec<u32> {
+    let items = fetch_all();
+    items.into_iter().take(max).collect()
+}
+",
+        );
+        let diags = run(&[&a, &b]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].message.contains("renamed copy"));
+        assert!(diags[0].message.contains("load_rows"));
+    }
+
+    #[test]
+    fn rust_renamed_nested_fn_copy_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write(
+            &dir,
+            "a.rs",
+            "\
+fn total(xs: &[u32]) -> u32 {
+    fn step(x: u32) -> u32 { x + 1 }
+    xs.iter().map(|x| step(*x)).sum()
+}
+",
+        );
+        let b = write(
+            &dir,
+            "b.rs",
+            "\
+fn sum_all(xs: &[u32]) -> u32 {
+    fn bump(x: u32) -> u32 { x + 1 }
+    xs.iter().map(|x| bump(*x)).sum()
+}
+",
+        );
+        let diags = run(&[&a, &b]);
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert!(diags[0].message.contains("renamed copy"));
     }
 
     #[test]
