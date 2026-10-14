@@ -542,3 +542,98 @@ fn ansi_fixture_does_not_cost_its_batch_its_diagnostics_issue_8402() {
         .stdout(predicate::str::contains("no-debugger"))
         .stderr(predicate::str::contains("crashed unexpectedly").not());
 }
+
+/// One long exported function and one standalone comment.
+/// Copied verbatim, it trips all three cross-file duplicate rules.
+fn duplicated_module_8611() -> String {
+    let body: String = (0..25)
+        .map(|i| format!("  const value_{i} = computeExpensive(seed, \"param_{i}\");\n"))
+        .collect();
+    format!(
+        "export function computeEverything(seed: number): number {{\n{body}  return value_0 + value_24;\n}}\n\n\
+         // Retry budget reasoning: the upstream billing gateway throttles bursts above forty \
+         requests, so invoices travel in windows of eight with a pause between them.\n"
+    )
+}
+
+/// A git repository with `a.ts` committed, ready for staged changes.
+fn repo_with_committed_original_8611() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    fs::write(root.join("a.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+    dir
+}
+
+#[test]
+fn staged_copy_of_an_unchanged_function_is_reported_issue_8611() {
+    let dir = repo_with_committed_original_8611();
+    let root = dir.path();
+    fs::write(root.join("b.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "b.ts"]);
+
+    let on_b_naming_a = |rule: &str| {
+        predicate::str::is_match(format!(r"b\.ts:\d+:\d+: error \[{rule}\][^\n]*a\.ts")).unwrap()
+    };
+    common::comply()
+        .current_dir(root)
+        .args(["--staged", "--diff-only"])
+        .assert()
+        .failure()
+        .stdout(on_b_naming_a("no-duplicate-function"))
+        .stdout(on_b_naming_a("no-clones"))
+        .stdout(on_b_naming_a("no-duplicate-comments"));
+}
+
+#[test]
+fn unchanged_duplicates_stay_out_of_a_staged_scan_issue_8611() {
+    let dir = repo_with_committed_original_8611();
+    let root = dir.path();
+    fs::write(root.join("b.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "b.ts"]);
+    git(root, &["commit", "-qm", "copy"]);
+    fs::write(root.join("c.ts"), "export const unrelated = 1;\n").unwrap();
+    git(root, &["add", "c.ts"]);
+
+    common::comply()
+        .current_dir(root)
+        .arg("--staged")
+        .assert()
+        .stdout(predicate::str::contains("no-duplicate-function").not())
+        .stdout(predicate::str::contains("no-clones").not())
+        .stdout(predicate::str::contains("no-duplicate-comments").not());
+}
+
+#[test]
+fn two_staged_copies_are_reported_once_on_the_last_path_issue_8611() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    fs::write(root.join("a.ts"), duplicated_module_8611()).unwrap();
+    fs::write(root.join("b.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "a.ts", "b.ts"]);
+
+    let out = common::comply()
+        .current_dir(root)
+        .args(["--staged", "--diff-only", "--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let findings: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    let on = |rule: &str| -> Vec<String> {
+        findings
+            .iter()
+            .filter(|f| f["ruleId"] == rule)
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for rule in ["no-duplicate-function", "no-clones"] {
+        let files = on(rule);
+        assert_eq!(files.len(), 1, "{rule}: {stdout}");
+        assert!(files[0].ends_with("b.ts"), "{rule}: {stdout}");
+    }
+}
