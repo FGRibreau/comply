@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2057 rules across 152 categories.
+2059 rules across 153 categories.
 
 ## Categories
 
@@ -35,6 +35,7 @@
 - [css > i18n](#css-i18n) (1 rules)
 - [database](#database) (2 rules)
 - [database > migrations](#database-migrations) (2 rules)
+- [deployment](#deployment) (1 rules)
 - [docker](#docker) (55 rules)
 - [docker-compose](#docker-compose) (8 rules)
 - [docker-compose > security](#docker-compose-security) (1 rules)
@@ -789,6 +790,12 @@
 |------|-------------|-------------|
 | `migration-needs-lock-timeout` | DDL migration without `SET lock_timeout` risks write queue pileups. | Add `SET lock_timeout = '5s';` at the top of every DDL migration. Without it, an ALTER TABLE on a busy table queues all writes behind the lock indefinitely. |
 | `migration-needs-rollback` | Migration without a `down`/rollback function is irreversible. | Add an explicit `down()` / `rollback()` function to every migration. Irreversible migrations prevent quick recovery from bad deploys. Make data migrations idempotent with `ON CONFLICT DO NOTHING`. |
+
+## deployment
+
+| Rule | Description | Remediation |
+|------|-------------|-------------|
+| `no-undeclared-env-var` | A runtime environment read must be declared in the nearest `.env.example`. | Add `NAME=` (or `# NAME=`) to the nearest `.env.example`, or allow-list a tooling name in `comply.toml`:  [rules.no-undeclared-env-var] allowed = ["NODE_ENV"] |
 
 ## docker
 

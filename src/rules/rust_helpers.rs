@@ -3856,7 +3856,7 @@ fn collect_string_literals(node: Node, source: &[u8], out: &mut Vec<String>) {
 
 /// The unquoted text of a `string_literal` node — its `string_content` child,
 /// or the literal with its surrounding quotes trimmed when empty.
-fn string_literal_value<'a>(node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
+pub fn string_literal_value<'a>(node: Node<'a>, source: &'a [u8]) -> Option<&'a str> {
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
         if child.kind() == "string_content" {
@@ -10751,7 +10751,7 @@ pub fn subtree_reads_env_var(node: Node, source: &[u8]) -> bool {
 /// True when `node` is a call whose callee path ends in `env::var` or
 /// `env::var_os` — i.e. the final segment is `var`/`var_os` and the
 /// segment before it is `env` (matches `std::env::var_os`, `env::var`, …).
-fn is_env_var_call(node: Node, source: &[u8]) -> bool {
+pub fn is_env_var_call(node: Node, source: &[u8]) -> bool {
     if node.kind() != "call_expression" {
         return false;
     }
