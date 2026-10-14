@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2059 rules across 152 categories.
+2068 rules across 152 categories.
 
 ## Categories
 
@@ -22,13 +22,13 @@
 - [better-result](#better-result) (20 rules)
 - [bundle-size](#bundle-size) (3 rules)
 - [ci-cd](#ci-cd) (9 rules)
-- [code-quality](#code-quality) (259 rules)
+- [code-quality](#code-quality) (261 rules)
 - [code-quality > imports](#code-quality-imports) (4 rules)
 - [code-quality > regex](#code-quality-regex) (17 rules)
 - [comments](#comments) (7 rules)
 - [comments > suppressions](#comments-suppressions) (1 rules)
 - [complexity](#complexity) (4 rules)
-- [correctness](#correctness) (11 rules)
+- [correctness](#correctness) (12 rules)
 - [correctness > package-json](#correctness-package-json) (1 rules)
 - [css](#css) (40 rules)
 - [css > accessibility](#css-accessibility) (1 rules)
@@ -83,7 +83,7 @@
 - [nuxt > seo](#nuxt-seo) (1 rules)
 - [nuxt > ssr](#nuxt-ssr) (2 rules)
 - [package-json](#package-json) (3 rules)
-- [performance](#performance) (16 rules)
+- [performance](#performance) (17 rules)
 - [performance > code-quality](#performance-code-quality) (3 rules)
 - [performance > imports](#performance-imports) (2 rules)
 - [performance > testing](#performance-testing) (1 rules)
@@ -94,7 +94,7 @@
 - [promise](#promise) (6 rules)
 - [qwik](#qwik) (1 rules)
 - [qwik > correctness](#qwik-correctness) (2 rules)
-- [react](#react) (127 rules)
+- [react](#react) (129 rules)
 - [react > code-quality](#react-code-quality) (4 rules)
 - [react > imports](#react-imports) (1 rules)
 - [react > performance](#react-performance) (3 rules)
@@ -451,6 +451,7 @@
 | `no-collapsible-if` | Nested `if` can be merged with `&&`. | Merge `if (a) { if (b) { ... } }` into `if (a && b) { ... }`. Unnecessary nesting wastes indent levels. |
 | `no-collection-size-mischeck` | `.length >= 0` is always true; `.length < 0` is always false. | Use `.length > 0` to check non-empty, or `.length === 0` to check empty. |
 | `no-common-grab-bag` | A `common`/`utils`/`helpers`/`shared`/`misc`/`util` module holding a large exported surface names none of what it owns. | Split the module along the concerns it accumulated and name each part after what that part owns. |
+| `no-conditional-empty-object-spread` | A conditional spread with an empty-object branch hides an optional key behind a trick. | Set the key explicitly (`a: c ? value : undefined`) or assign it after building the object. |
 | `no-console-spaces` | Leading/trailing spaces in `console.log` arguments produce misaligned output. | Remove the leading or trailing space from the string argument. Use comma-separated arguments for spacing instead. |
 | `no-constructor-side-effects` | `new X()` without assignment is a side-effect anti-pattern. | Assign the result of `new X()` to a variable, or refactor side effects out of the constructor into a static method. |
 | `no-deprecated-api` | Usage of deprecated Node.js or browser API. | Replace with the modern equivalent: `Buffer.from()` instead of `new Buffer()`, `url.URL` instead of `url.parse()`, etc. |
@@ -510,6 +511,7 @@
 | `no-redundant-clsx` | `clsx()` / `cn()` called with a single static string is redundant. | Remove clsx/cn wrapper when using single static string |
 | `no-redundant-jump` | Redundant `return;` at end of function or `continue;` at end of loop body. | Remove the redundant `return;` or `continue;` — execution already falls through naturally. |
 | `no-redundant-null-undefined-check` | Comparing the same operand against both `null` and `undefined` is a verbose nullish check. | Collapse `x !== null && x !== undefined` (or the `x === null \|\| x === undefined` mirror) into a single strict, type-narrowing guard — not the loose `x != null`, which fights projects that ban `==`/`!=`. Define once: `function isDefined<T>(v: T): v is NonNullable<T> { return v !== null && v !== undefined; }`, then use `isDefined(x)` / `!isDefined(x)`. It narrows to `NonNullable<T>` (e.g. `arr.filter(isDefined)`). No autofix — the helper's name and location are project-specific. |
+| `no-reflect-apply` | `Reflect.apply` is an indirection over a direct call or `Function.prototype.apply`. | Call the function directly, or use `f.apply(thisArg, args)`. |
 | `no-restricted-object-keys` | User-configured keys forbidden in an object literal passed under a named property or JSX prop. | Follow the entry's message: use the project-approved token or move the value out of this object. |
 | `no-shallow-passthrough-method` | Method body only forwards arguments to another method with the same signature. | Inline the call at each call-site or add real behaviour — a pure pass-through adds a layer with no value. |
 | `no-side-effects-in-initialization` | Top-level side effects (bare calls, `new`, IIFE) at module scope prevent tree-shaking. | Avoid side effects at module top-level for tree-shaking |
@@ -714,6 +716,7 @@
 | `no-string-case-mismatch` | Comparing a `toLowerCase()`/`toUpperCase()` call against a literal of the opposite case is always false. | Write the literal in the matching case (e.g. `"ABC"` for `toUpperCase()`), or remove the case conversion. |
 | `no-top-level-literals` | JSON top-level value is a bare literal. | Wrap the value in an array or object — some JSON parsers only accept an object or array as the root element. |
 | `no-useless-escape-in-string` | Disallow unnecessary escapes in string literals. | Remove the backslash: escaping a character that has no special meaning in this string context has no effect and may confuse a reader. Only the enclosing quote and special characters need to be escaped. |
+| `require-explicit-time-zone` | Date formatting without a `timeZone` option follows the host's time zone. | Pass `{ timeZone: "…" }` in the options argument. |
 
 ## correctness > package-json
 
@@ -1533,6 +1536,7 @@
 | `js-index-maps` | `array.find()`/`findIndex()` inside a loop — build a `Map` for O(1) lookups. | Build a `Map` (or object index) from the array before the loop: `const map = new Map(items.map(i => [i.id, i]))`, then use `map.get(key)` inside the loop. |
 | `js-no-flatmap-filter` | `.flatMap().filter()` iterates twice — combine into a single `.flatMap()`. | Move the filter predicate into the `flatMap` callback and return `[]` for items that should be excluded. |
 | `js-no-math-spread-array` | `Math.min(...array)` / `Math.max(...array)` — stack-overflow risk on large arrays. | Use a reduce or for-loop: `array.reduce((a, b) => a < b ? a : b, Infinity)` for min, or `-Infinity` and `>` for max. |
+| `no-reduce-accumulator-copy` | Copying the accumulator inside a `reduce` callback makes the reduce quadratic. | Mutate the accumulator in place (`acc.push(x); return acc;`) or use a `for` loop. |
 | `no-sync-scripts` | External `<script src>` must set `async` or `defer` to avoid blocking parsing. | Add `async` (order-independent) or `defer` (order-preserving) to the `<script>`. |
 | `perf-font-face-display-swap` | Every `@font-face` block must declare `font-display: swap`. | Add `font-display: swap;` inside the `@font-face` rule. |
 | `perf-font-preload-crossorigin` | `<link rel="preload" as="font">` must include `crossorigin` and `type="font/woff2"`. | Add `crossorigin` and `type="font/woff2"` to the font preload link. |
@@ -1634,7 +1638,9 @@
 | `jsx-no-undef` | JSX component tag refers to an undefined identifier. | Import the component or declare it in this file before using it in JSX. |
 | `jsx-restricted-elements` | User-configured policy over JSX elements: a selector (`tag` regex or `element` name, narrowed by attribute, class and text conditions) and one action (`use` a replacement, `forbid_attr`, `require_attr`, `forbid_class`, `forbid_nested`), each with its own message. | Use the element, attribute or class the project policy names in the message. |
 | `no-em-dash-in-jsx-text` | Em-dash/en-dash in user-facing JSX copy reads as AI-generated prose. | Replace the em-dash (—) or en-dash (–) with a plain hyphen, or rewrite the sentence to drop the dash. |
+| `no-escape-in-jsx-text` | A JavaScript escape in JSX text or a quoted JSX attribute renders literally. | Write the character itself, or wrap the string in an expression container: `{"\u00A0"}`. |
 | `no-hook-setter-in-body` | `useState` setter called directly in component body causes infinite re-renders. | Move the setter call inside `useEffect`, `useCallback`, or an event handler. |
+| `no-native-title` | A `title` attribute on an HTML element shows the browser's native tooltip. | Use the project's tooltip component instead of the native `title` attribute. |
 | `no-react-specific-props` | React-specific JSX prop used in a non-React framework. | Replace the React-specific prop with its DOM-native form (`className` → `class`, `htmlFor` → `for`). |
 | `no-redundant-state` | `useState` whose setter is never used — the value never changes. | Replace with a plain `const` or `useMemo`. A state variable that is never updated adds unnecessary re-render machinery. |
 | `no-submit-handler-without-preventDefault` | Inline `onSubmit={...}` handler does not call `preventDefault()`. | Call `event.preventDefault()` at the top of the handler, or switch to a form action that doesn't navigate. |
@@ -1756,7 +1762,7 @@
 
 | Rule | Description | Remediation |
 |------|-------------|-------------|
-| `react-no-chained-filter-map-reduce` | Three or more consecutive `.filter`/`.map`/`.reduce` calls walk the array multiple times and allocate intermediate arrays. | Collapse the chain into a single `for`/`reduce` pass or use a lazy iterator. |
+| `react-no-chained-filter-map-reduce` | `min_chain` or more consecutive `.filter`/`.map`/`.reduce` calls walk the array multiple times and allocate intermediate arrays. | Collapse the chain into a single `for`/`reduce` pass or use a lazy iterator. |
 | `react-no-dedup-filter-indexof` | Deduping via `filter((v, i, a) => a.indexOf(v) === i)` is O(n²). | Use `[...new Set(arr)]` — O(n). |
 | `react-no-find-in-map-loop` | `.find()` / `.filter()` called inside a `.map()` callback or `for` loop turns an O(n) pass into O(n²). | Build a `Map`/lookup index once, then look up inside the loop. |
 | `react-no-sort-for-extrema` | Sorting an array to pick only its first or last element is O(n log n) for work that can be done in O(n). | Use a single-pass `Math.min` / `Math.max` or a manual fold. |
@@ -2430,7 +2436,7 @@
 | `test-check-exception` | `.toThrow()` without specifying what to check. | Specify the expected error: `.toThrow(TypeError)`, `.toThrow('message')`, or `.toThrow(/regex/)`. Bare `.toThrow()` passes for any error, hiding bugs. |
 | `testing-no-concurrent-without-context-expect` | test.concurrent must destructure { expect } from the test context — the module-level expect is not scoped per concurrent test. | Destructure expect from the test context: test.concurrent('...', ({ expect }) => { ... }) |
 | `testing-no-conditional-assertion` | Assertions inside if-branches silently skip when the branch is not taken — the test passes but checks nothing. | Make the assertion unconditional. If the branch depends on input, split into separate tests or use expect.soft / describe.each. |
-| `testing-no-mocking-internal-modules` | Mocking a relative internal module couples tests to implementation details. | Mock only external boundaries (HTTP, DB, third-party SDKs). Refactor so the collaborator is injected, or rely on the real internal module. |
+| `testing-no-mocking-internal-modules` | Mocking a relative internal module (or any package, under `include_packages`) couples tests to implementation details. | Mock only external boundaries (HTTP, DB, third-party SDKs). Refactor so the collaborator is injected, or rely on the real internal module. |
 | `testing-no-mocktimers-without-restore` | useFakeTimers() without a matching useRealTimers() in afterEach/afterAll leaks mocked timers into sibling tests. | Call vi.useRealTimers() (or jest.useRealTimers()) in afterEach/afterAll to restore the real timers. |
 | `testing-no-real-external-service` | Test makes a real network call to an external service — intercept it with MSW instead. | Mock the external service with MSW (or equivalent) — never hit the real endpoint from tests. |
 | `testing-no-shared-state` | Top-level let/var mutated across test() blocks without being reset in beforeEach — tests become order-dependent. | Move the variable inside each test, or reset it in beforeEach(). Prefer fresh state per test over shared mutable state. |
@@ -2808,7 +2814,7 @@
 | `ui-no-justified-text` | `textAlign: 'justify'` without `hyphens: 'auto'` — produces rivers of whitespace. | Either drop `textAlign: 'justify'` or pair it with `hyphens: 'auto'` so the browser can break long words and avoid awkward spacing. |
 | `ui-no-keyframes-for-interruptible` | Class-toggled (state-driven) animations should use `transition`; `@keyframes` can't interrupt mid-flight. | Replace the `@keyframes` + `animation:` pair with `transition` on the same properties so toggles interpolate from the current value. |
 | `ui-no-large-animated-blur` | Inline `filter: blur(Npx)` with N > 20 — expensive, escalates with radius and layer size, can exhaust GPU memory on mobile. | Reduce the blur radius below 20px, or composite the blur statically into a background image. |
-| `ui-no-layout-property-animation` | Inline `transition` references a layout-triggering property — animating layout causes per-frame layout recalculation. | Animate `transform`, `opacity`, `color`, `background`, or `filter` instead — they don't trigger layout. |
+| `ui-no-layout-property-animation` | Inline `transition` or a motion `animate`/`initial`/`exit`/`while*` prop references a layout-triggering property — animating layout causes per-frame layout recalculation. | Animate `transform`, `opacity`, `color`, `background`, or `filter` instead — they don't trigger layout. |
 | `ui-no-long-transition-duration` | Inline `transitionDuration`/`animationDuration` above 1s — feels sluggish. | Keep UI transitions under 1s (typically 150-400ms). Long durations block interaction and harm perceived performance. |
 | `ui-no-permanent-will-change` | Inline `willChange` is permanent — `will-change` should be applied dynamically, not baked into static styles. | Apply `will-change` only during the active animation (e.g. on hover/focus) and remove it after, or set it to `'auto'`. |
 | `ui-no-pure-black` | Pure black (`#000`, `rgb(0,0,0)`, `black`) looks harsh on screens — prefer a near-black. | Use a slightly warmer/softer tone such as `#0a0a0a` or an OKLCH near-black. |
