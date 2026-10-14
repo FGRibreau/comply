@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2064 rules across 152 categories.
+2090 rules across 153 categories.
 
 ## Categories
 
@@ -22,19 +22,20 @@
 - [better-result](#better-result) (20 rules)
 - [bundle-size](#bundle-size) (3 rules)
 - [ci-cd](#ci-cd) (9 rules)
-- [code-quality](#code-quality) (260 rules)
+- [code-quality](#code-quality) (266 rules)
 - [code-quality > imports](#code-quality-imports) (4 rules)
 - [code-quality > regex](#code-quality-regex) (17 rules)
 - [comments](#comments) (7 rules)
 - [comments > suppressions](#comments-suppressions) (1 rules)
 - [complexity](#complexity) (4 rules)
-- [correctness](#correctness) (11 rules)
+- [correctness](#correctness) (12 rules)
 - [correctness > package-json](#correctness-package-json) (1 rules)
 - [css](#css) (40 rules)
 - [css > accessibility](#css-accessibility) (1 rules)
 - [css > i18n](#css-i18n) (1 rules)
 - [database](#database) (2 rules)
 - [database > migrations](#database-migrations) (2 rules)
+- [deployment](#deployment) (1 rules)
 - [docker](#docker) (55 rules)
 - [docker-compose](#docker-compose) (8 rules)
 - [docker-compose > security](#docker-compose-security) (1 rules)
@@ -83,7 +84,7 @@
 - [nuxt > seo](#nuxt-seo) (1 rules)
 - [nuxt > ssr](#nuxt-ssr) (2 rules)
 - [package-json](#package-json) (3 rules)
-- [performance](#performance) (16 rules)
+- [performance](#performance) (17 rules)
 - [performance > code-quality](#performance-code-quality) (3 rules)
 - [performance > imports](#performance-imports) (2 rules)
 - [performance > testing](#performance-testing) (1 rules)
@@ -94,7 +95,7 @@
 - [promise](#promise) (6 rules)
 - [qwik](#qwik) (1 rules)
 - [qwik > correctness](#qwik-correctness) (2 rules)
-- [react](#react) (127 rules)
+- [react](#react) (132 rules)
 - [react > code-quality](#react-code-quality) (4 rules)
 - [react > imports](#react-imports) (1 rules)
 - [react > performance](#react-performance) (3 rules)
@@ -102,14 +103,14 @@
 - [react-native](#react-native) (17 rules)
 - [react-native > security](#react-native-security) (1 rules)
 - [regex](#regex) (33 rules)
-- [rust](#rust) (80 rules)
+- [rust](#rust) (81 rules)
 - [rust > api](#rust-api) (3 rules)
 - [rust > architecture](#rust-architecture) (1 rules)
 - [rust > async](#rust-async) (1 rules)
 - [rust > concurrency](#rust-concurrency) (2 rules)
 - [rust > configuration](#rust-configuration) (1 rules)
 - [rust > correctness](#rust-correctness) (3 rules)
-- [rust > observability](#rust-observability) (1 rules)
+- [rust > observability](#rust-observability) (2 rules)
 - [rust > performance](#rust-performance) (11 rules)
 - [rust > security](#rust-security) (2 rules)
 - [rust > serde](#rust-serde) (1 rules)
@@ -126,8 +127,8 @@
 - [sql > concurrency](#sql-concurrency) (1 rules)
 - [sql > constraints](#sql-constraints) (1 rules)
 - [sql > indexing](#sql-indexing) (2 rules)
-- [sql > migrations](#sql-migrations) (6 rules)
-- [style](#style) (1 rules)
+- [sql > migrations](#sql-migrations) (8 rules)
+- [style](#style) (2 rules)
 - [tailwind](#tailwind) (23 rules)
 - [tailwind > accessibility](#tailwind-accessibility) (6 rules)
 - [tailwind > i18n](#tailwind-i18n) (1 rules)
@@ -144,7 +145,7 @@
 - [testing > testing-library](#testing-testing-library) (3 rules)
 - [testing > vitest](#testing-vitest) (7 rules)
 - [type-safety](#type-safety) (1 rules)
-- [typescript](#typescript) (187 rules)
+- [typescript](#typescript) (194 rules)
 - [typescript > async](#typescript-async) (5 rules)
 - [typescript > code-quality](#typescript-code-quality) (1 rules)
 - [typescript > jsdoc](#typescript-jsdoc) (2 rules)
@@ -448,13 +449,17 @@
 | `no-boolean-flag-param` | Boolean flag parameters hide two behaviors behind one signature. | Split into two named functions. `sendNotification(msg, isUrgent)` → `sendUrgentNotification(msg)` + `sendNormalNotification(msg)`. A ternary or options object is not a fix — the boolean must disappear from the signature. |
 | `no-built-in-override` | Overriding built-in globals like `Array`, `Object`, `Promise` shadows critical APIs. | Rename the variable. Overriding built-in globals breaks standard library behaviour and causes subtle bugs downstream. |
 | `no-case-label-in-switch` | Label statement inside switch looks like a case but is a JS label. | Use `case <value>:` instead. A bare `identifier:` inside a switch is a label statement, not a case branch. |
+| `no-clones` | A block of 100 or more tokens must not be duplicated across files. | Extract the duplicated block into a shared function or module. |
 | `no-collapsible-if` | Nested `if` can be merged with `&&`. | Merge `if (a) { if (b) { ... } }` into `if (a && b) { ... }`. Unnecessary nesting wastes indent levels. |
 | `no-collection-size-mischeck` | `.length >= 0` is always true; `.length < 0` is always false. | Use `.length > 0` to check non-empty, or `.length === 0` to check empty. |
 | `no-common-grab-bag` | A `common`/`utils`/`helpers`/`shared`/`misc`/`util` module holding a large exported surface names none of what it owns. | Split the module along the concerns it accumulated and name each part after what that part owns. |
+| `no-conditional-empty-object-spread` | A conditional spread with an empty-object branch hides an optional key behind a trick. | Set the key explicitly (`a: c ? value : undefined`) or assign it after building the object. |
 | `no-console-spaces` | Leading/trailing spaces in `console.log` arguments produce misaligned output. | Remove the leading or trailing space from the string argument. Use comma-separated arguments for spacing instead. |
 | `no-constructor-side-effects` | `new X()` without assignment is a side-effect anti-pattern. | Assign the result of `new X()` to a variable, or refactor side effects out of the constructor into a static method. |
 | `no-deprecated-api` | Usage of deprecated Node.js or browser API. | Replace with the modern equivalent: `Buffer.from()` instead of `new Buffer()`, `url.URL` instead of `url.parse()`, etc. |
 | `no-document-cookie` | Do not use `document.cookie` directly. | Use a cookie library (e.g. `js-cookie`, `cookie`) instead of raw `document.cookie` access. Direct cookie manipulation is error-prone and hard to maintain. |
+| `no-duplicate-comments` | A comment must not copy the opening of a comment in another place. | Lift the shared rationale into an ADR or canonical doc the comments cite. |
+| `no-duplicate-function` | A named function must not be copied into another file, verbatim or with renamed parameters, locals or name. | Extract the function into a shared module and import it from both call sites. |
 | `no-duplicate-string` | String literal appears 3+ times — extract to a constant. | Extract the repeated string into a named constant and reference it everywhere. Reduces typo risk and makes future changes a single-line edit. |
 | `no-duplicated-branches` | Two branches of an if/else have identical bodies. | Merge the conditions or remove the duplicate branch. |
 | `no-element-overwrite` | A collection element is written and immediately overwritten on the next line. | Remove the first assignment or use a different key/index. |
@@ -505,11 +510,13 @@
 | `no-one-iteration-loop` | Loop body always exits on the first iteration. | Remove the loop — it is equivalent to the body running once. If a loop is intended, ensure the exit statement is guarded by a condition. |
 | `no-primitive-wrappers` | `new String()`, `new Number()`, `new Boolean()` create wrapper objects, not primitives. | Use primitive literals or factory functions without `new`: `String(x)`, `Number(x)`, `Boolean(x)`. |
 | `no-process-exit` | `process.exit()` terminates abruptly — throw an error instead. | Replace `process.exit()` with `throw new Error(...)`. Only use `process.exit()` in CLI entry points. |
+| `no-raw-invisible-character` | An invisible character written raw in a string cannot be seen in review. | Write the character as the escape the message names. |
 | `no-redundant-assignment` | Variable is assigned then immediately overwritten. | Remove the first assignment — it has no observable effect. |
 | `no-redundant-boolean` | Redundant boolean literal in a return or condition. | Simplify: `if (x) return true; else return false;` → `return x;`. `x === true` → `x`. The boolean adds no information. |
 | `no-redundant-clsx` | `clsx()` / `cn()` called with a single static string is redundant. | Remove clsx/cn wrapper when using single static string |
 | `no-redundant-jump` | Redundant `return;` at end of function or `continue;` at end of loop body. | Remove the redundant `return;` or `continue;` — execution already falls through naturally. |
 | `no-redundant-null-undefined-check` | Comparing the same operand against both `null` and `undefined` is a verbose nullish check. | Collapse `x !== null && x !== undefined` (or the `x === null \|\| x === undefined` mirror) into a single strict, type-narrowing guard — not the loose `x != null`, which fights projects that ban `==`/`!=`. Define once: `function isDefined<T>(v: T): v is NonNullable<T> { return v !== null && v !== undefined; }`, then use `isDefined(x)` / `!isDefined(x)`. It narrows to `NonNullable<T>` (e.g. `arr.filter(isDefined)`). No autofix — the helper's name and location are project-specific. |
+| `no-reflect-apply` | `Reflect.apply` is an indirection over a direct call or `Function.prototype.apply`. | Call the function directly, or use `f.apply(thisArg, args)`. |
 | `no-restricted-object-keys` | User-configured keys forbidden in an object literal passed under a named property or JSX prop. | Follow the entry's message: use the project-approved token or move the value out of this object. |
 | `no-restricted-properties` | User-configured `object.property` access, bracket access or destructuring, each entry with its own message. | Follow the message of the entry; scope an allowed file with `[overrides."<glob>"] disable`. |
 | `no-shallow-passthrough-method` | Method body only forwards arguments to another method with the same signature. | Inline the call at each call-site or add real behaviour — a pure pass-through adds a layer with no value. |
@@ -715,6 +722,7 @@
 | `no-string-case-mismatch` | Comparing a `toLowerCase()`/`toUpperCase()` call against a literal of the opposite case is always false. | Write the literal in the matching case (e.g. `"ABC"` for `toUpperCase()`), or remove the case conversion. |
 | `no-top-level-literals` | JSON top-level value is a bare literal. | Wrap the value in an array or object — some JSON parsers only accept an object or array as the root element. |
 | `no-useless-escape-in-string` | Disallow unnecessary escapes in string literals. | Remove the backslash: escaping a character that has no special meaning in this string context has no effect and may confuse a reader. Only the enclosing quote and special characters need to be escaped. |
+| `require-explicit-time-zone` | Date formatting without a `timeZone` option follows the host's time zone. | Pass `{ timeZone: "…" }` in the options argument. |
 
 ## correctness > package-json
 
@@ -792,6 +800,12 @@
 |------|-------------|-------------|
 | `migration-needs-lock-timeout` | DDL migration without `SET lock_timeout` risks write queue pileups. | Add `SET lock_timeout = '5s';` at the top of every DDL migration. Without it, an ALTER TABLE on a busy table queues all writes behind the lock indefinitely. |
 | `migration-needs-rollback` | Migration without a `down`/rollback function is irreversible. | Add an explicit `down()` / `rollback()` function to every migration. Irreversible migrations prevent quick recovery from bad deploys. Make data migrations idempotent with `ON CONFLICT DO NOTHING`. |
+
+## deployment
+
+| Rule | Description | Remediation |
+|------|-------------|-------------|
+| `no-undeclared-env-var` | A runtime environment read must be declared in the nearest `.env.example`. | Add `NAME=` (or `# NAME=`) to the nearest `.env.example`, or allow-list a tooling name in `comply.toml`:  [rules.no-undeclared-env-var] allowed = ["NODE_ENV"] |
 
 ## docker
 
@@ -1535,6 +1549,7 @@
 | `js-index-maps` | `array.find()`/`findIndex()` inside a loop — build a `Map` for O(1) lookups. | Build a `Map` (or object index) from the array before the loop: `const map = new Map(items.map(i => [i.id, i]))`, then use `map.get(key)` inside the loop. |
 | `js-no-flatmap-filter` | `.flatMap().filter()` iterates twice — combine into a single `.flatMap()`. | Move the filter predicate into the `flatMap` callback and return `[]` for items that should be excluded. |
 | `js-no-math-spread-array` | `Math.min(...array)` / `Math.max(...array)` — stack-overflow risk on large arrays. | Use a reduce or for-loop: `array.reduce((a, b) => a < b ? a : b, Infinity)` for min, or `-Infinity` and `>` for max. |
+| `no-reduce-accumulator-copy` | Copying the accumulator inside a `reduce` callback makes the reduce quadratic. | Mutate the accumulator in place (`acc.push(x); return acc;`) or use a `for` loop. |
 | `no-sync-scripts` | External `<script src>` must set `async` or `defer` to avoid blocking parsing. | Add `async` (order-independent) or `defer` (order-preserving) to the `<script>`. |
 | `perf-font-face-display-swap` | Every `@font-face` block must declare `font-display: swap`. | Add `font-display: swap;` inside the `@font-face` rule. |
 | `perf-font-preload-crossorigin` | `<link rel="preload" as="font">` must include `crossorigin` and `type="font/woff2"`. | Add `crossorigin` and `type="font/woff2"` to the font preload link. |
@@ -1626,6 +1641,9 @@
 
 | Rule | Description | Remediation |
 |------|-------------|-------------|
+| `banned-copy-words` | A word the project bans from its UI copy. | Rewrite the copy without the word, or add the phrase to `allowed` in comply.toml. |
+| `copy-apostrophe-style` | An apostrophe in UI copy that differs from the configured style. | Write the apostrophe the message names, or change `style` in comply.toml. |
+| `french-nbsp-before-punctuation` | French copy puts a non-breaking space before `:`, `;`, `?` and `!`. | Write the escaped non-breaking space the message names before the mark, replacing a plain space if there is one. |
 | `function-component-definition` | React components must be defined using `function` declarations, not arrow functions. | Replace `const MyComponent = () => <JSX />` with `function MyComponent() { return <JSX />; }`. |
 | `hook-use-state` | useState destructuring must follow `[value, setValue]` naming. | Rename the setter to `set` + PascalCase of the state variable name. |
 | `jsx-ensure-booleans` | Left-hand side of `{x && <Jsx />}` must be an unambiguous boolean. | Coerce with `!!x`, compare (`x > 0`, `x != null`), or use a ternary `cond ? <Jsx /> : null`. |
@@ -1636,7 +1654,9 @@
 | `jsx-no-undef` | JSX component tag refers to an undefined identifier. | Import the component or declare it in this file before using it in JSX. |
 | `jsx-restricted-elements` | User-configured policy over JSX elements: a selector (`tag` regex or `element` name, narrowed by attribute, class and text conditions) and one action (`use` a replacement, `forbid_attr`, `require_attr`, `forbid_class`, `forbid_nested`), each with its own message. | Use the element, attribute or class the project policy names in the message. |
 | `no-em-dash-in-jsx-text` | Em-dash/en-dash in user-facing JSX copy reads as AI-generated prose. | Replace the em-dash (—) or en-dash (–) with a plain hyphen, or rewrite the sentence to drop the dash. |
+| `no-escape-in-jsx-text` | A JavaScript escape in JSX text or a quoted JSX attribute renders literally. | Write the character itself, or wrap the string in an expression container: `{"\u00A0"}`. |
 | `no-hook-setter-in-body` | `useState` setter called directly in component body causes infinite re-renders. | Move the setter call inside `useEffect`, `useCallback`, or an event handler. |
+| `no-native-title` | A `title` attribute on an HTML element shows the browser's native tooltip. | Use the project's tooltip component instead of the native `title` attribute. |
 | `no-react-specific-props` | React-specific JSX prop used in a non-React framework. | Replace the React-specific prop with its DOM-native form (`className` → `class`, `htmlFor` → `for`). |
 | `no-redundant-state` | `useState` whose setter is never used — the value never changes. | Replace with a plain `const` or `useMemo`. A state variable that is never updated adds unnecessary re-render machinery. |
 | `no-submit-handler-without-preventDefault` | Inline `onSubmit={...}` handler does not call `preventDefault()`. | Call `event.preventDefault()` at the top of the handler, or switch to a form action that doesn't navigate. |
@@ -1758,7 +1778,7 @@
 
 | Rule | Description | Remediation |
 |------|-------------|-------------|
-| `react-no-chained-filter-map-reduce` | Three or more consecutive `.filter`/`.map`/`.reduce` calls walk the array multiple times and allocate intermediate arrays. | Collapse the chain into a single `for`/`reduce` pass or use a lazy iterator. |
+| `react-no-chained-filter-map-reduce` | `min_chain` or more consecutive `.filter`/`.map`/`.reduce` calls walk the array multiple times and allocate intermediate arrays. | Collapse the chain into a single `for`/`reduce` pass or use a lazy iterator. |
 | `react-no-dedup-filter-indexof` | Deduping via `filter((v, i, a) => a.indexOf(v) === i)` is O(n²). | Use `[...new Set(arr)]` — O(n). |
 | `react-no-find-in-map-loop` | `.find()` / `.filter()` called inside a `.map()` callback or `for` loop turns an O(n) pass into O(n²). | Build a `Map`/lookup index once, then look up inside the loop. |
 | `react-no-sort-for-extrema` | Sorting an array to pick only its first or last element is O(n log n) for work that can be done in O(n). | Use a single-pass `Math.min` / `Math.max` or a manual fold. |
@@ -1875,7 +1895,7 @@
 | `rust-eprintln-in-library` | `eprintln!` / `eprint!` invoked from library code. | Library code shouldn't write to stderr directly — consumers can't redirect, configure, or capture it. Use `tracing::warn!` / `tracing::error!` so the consumer's subscriber controls the output. |
 | `rust-error-variant-stringly` | Error enum variant carries a `String` or a catch-all payload instead of typed fields. | Give the variant the fields the caller needs to act on: `SchemaMismatch { expected: Type, got: Type }` instead of `Other(String)` or `InvalidSchema(String)`. When the variant only forwards another error, name that error and let thiserror wire it: `Io(#[from] std::io::Error)`. Where `rust-string-as-error` rejects `Result<T, String>` for having no error type at all, this rule rejects an error type whose variants carry no information. |
 | `rust-expect-over-allow` | Suppress lints with `#[expect(…)]`, not `#[allow(…)]`. | Replace `#[allow(lint)]` with `#[expect(lint, reason = "…")]`. `#[expect]` fails the build the day the warning it suppresses disappears, so the suppression dies with the problem; an `#[allow]` outlives it and silently covers the next offender that lands under it. Keep `#[allow]` only where the lint fires conditionally (a `cfg`-gated build, a generated file) and `#[expect]` would itself warn. Enforced by `clippy::allow_attributes`. |
-| `rust-explicit-enum-match-arms` | Wildcard `_` arm on a `match` that looks like it covers an enum. | Replace `_ => …` with the remaining variants explicitly (`Foo::A \| Foo::B => …`). The compile error on enum expansion is the whole point: it forces you to consciously handle each new case. |
+| `rust-explicit-enum-match-arms` | Wildcard `_` arm on a `match` over an enum declared in the Cargo workspace. | Replace `_ => …` with the remaining variants explicitly (`Foo::A \| Foo::B => …`). The compile error on enum expansion is the whole point: it forces you to consciously handle each new case. |
 | `rust-explicit-iter-loop` | Use iterator chains, not raw index loops. | Replace `for i in 0..vec.len() { vec[i] }` with `for x in &vec`. Iterator chains let the compiler vectorize the loop body and eliminate bounds checks. Enable `clippy::needless_range_loop` and `clippy::explicit_iter_loop`. |
 | `rust-hash-partial-eq-mismatch` | `Hash` and `PartialEq` are not implemented consistently (one derived, the other manual). | If two values are equal (`a == b`) they MUST produce the same hash. Mixing a derived `Hash` with a manual `PartialEq` (or vice versa) almost always breaks that invariant. Either derive both or implement both manually with care to keep them in sync. |
 | `rust-if-let-mutex-lock` | `if let ... = mtx.lock()` extends the lock guard's lifetime to cover the `else` branch. | Temporaries created in the scrutinee of `if let` live for the entire `if/else` expression. Hold the guard in a separate `let` binding so the lock is released before the `else` branch runs, or use `match` with explicit `drop()` calls. |
@@ -1898,6 +1918,7 @@
 | `rust-no-linkedlist` | Prefer `Vec<T>` over `LinkedList<T>` — cache locality wins. | Replace `LinkedList<T>` with `Vec<T>` or `VecDeque<T>`. LinkedList's theoretical O(1) splice is dominated in practice by Vec's cache locality for any realistic size. Enable `clippy::linkedlist`. |
 | `rust-no-lossy-as-cast` | `as` casts that can truncate or lose precision are silent bugs. | Replace the `as` cast with `try_into()` (returns Result) or `u8::try_from(x)` for integer narrowing. For guaranteed-safe widening casts (`u8` → `u32`), use `From::from(x)` / `x.into()` instead — explicit, documents the conversion is total. |
 | `rust-no-panic-macros` | No `panic!` / `todo!` / `unimplemented!` / `unreachable!` in production. | Replace the macro with a typed Result error. `todo!()` and `unimplemented!()` mark placeholders that must not ship. `unreachable!()` should only mark compiler-proven impossible states with a `// Impossible: ...` comment. Tests are exempted — panicking in a `#[test]` is a clean failure. |
+| `rust-no-parse-unwrap-or` | `.parse()` chained into `unwrap_or*` turns a corrupt value into a silent default. | Propagate the parse error with `?` or a typed error. Keep a deliberate fallback with `// comply-ignore: rust-no-parse-unwrap-or — <reason>`. |
 | `rust-no-print-macros` | `println!` writes past the logging pipeline. | Outside a binary's own output path, replace `println!` with a `tracing` macro (`tracing::info!`, `tracing::warn!`, `tracing::error!`) so the consumer's subscriber decides the level, the target and the sink. In a CLI, where stdout is the product, write through `std::io::stdout().lock()` + `writeln!` — it is buffered and the lint does not fire on it — or put `#[expect(clippy::print_stdout, reason = "CLI output")]` on `main`. Enforced by `clippy::print_stdout`. |
 | `rust-no-println-in-async` | `println!` / `eprintln!` inside async code blocks the runtime. | Replace `println!("…")` / `eprintln!("…")` with a `tracing` macro (`tracing::info!`, `tracing::warn!`, `tracing::error!`). `println!` takes a blocking stdout lock — inside an async task that stalls the reactor and interleaves output from concurrent tasks. Tracing macros are non-blocking and respect subscriber filters/spans. |
 | `rust-no-pub-use-glob` | `pub use foo::*` re-exports invisibly. | List the re-exports explicitly: `pub use foo::{Bar, Baz};`. Glob re-exports turn every change in `foo` into a silent change to your public API. |
@@ -1982,6 +2003,7 @@
 | Rule | Description | Remediation |
 |------|-------------|-------------|
 | `rust-prefer-tracing-over-log` | Use the `tracing` crate instead of `log`. | Replace `use log::…` and `log::{info,warn,error,debug,trace}!` with the equivalent `tracing` macros. `tracing` carries structured fields and span context across `async` boundaries, which `log` does not. The two crates can interoperate via `tracing-log` if you must support an external dependency that emits through `log`. |
+| `rust-tracing-structured-fields` | `tracing` event messages must not interpolate values; use structured fields. | Replace `warn!("fetch {url} failed: {e}")` with `warn!(%url, error = %e, "fetch failed")`. Fields stay queryable; an interpolated message is opaque text. |
 
 ## rust > performance
 
@@ -2212,11 +2234,14 @@
 | `sql-create-index-in-transaction` | `CREATE INDEX CONCURRENTLY` cannot run inside a transaction block. | Move `CREATE INDEX CONCURRENTLY` outside of `BEGIN`/`COMMIT`. Most migration tools have an option to disable the implicit transaction wrapper for a single migration. |
 | `sql-drop-table-no-cascade-warning` | `DROP TABLE` without `IF EXISTS` fails noisily on rerun, and `DROP TABLE ... CASCADE` silently destroys dependent objects. | Add `IF EXISTS` so reruns are idempotent. Avoid `CASCADE` — drop dependents explicitly so the migration documents what gets removed. |
 | `sql-pg-enum-with-alter-type-add-value` | `ALTER TYPE ... ADD VALUE` cannot run inside a transaction block before PostgreSQL 12, and even on newer versions the new value is not usable in the same transaction. | Run `ALTER TYPE ... ADD VALUE` outside `BEGIN`/`COMMIT`. If you need the new value within a transaction, prefer a CHECK-constrained text column over a true ENUM. |
+| `sql-update-replace-needs-row-check` | A migration `UPDATE … SET col = replace(col, …)` must check how many rows it changed. | Count the target rows `INTO expected` before the UPDATE, then `GET DIAGNOSTICS n = ROW_COUNT;` and `IF n <> expected THEN RAISE EXCEPTION …`. A check on zero rows alone fails on an empty database. |
+| `sql-validate-constraint-separate-migration` | A constraint added `NOT VALID` must not be validated in the same migration. | Move `ALTER TABLE t VALIDATE CONSTRAINT t_a_chk` to a later migration. In one transaction, the VALIDATE holds the lock that `NOT VALID` was meant to avoid. |
 
 ## style
 
 | Rule | Description | Remediation |
 |------|-------------|-------------|
+| `require-readable-spacing` | Missing blank line between logical statement groups: after a declaration run, before a `return` or `throw`, around a multi-line block. | Add an empty line between the two statements so each logical group reads on its own. |
 | `top-level-function` | Top-level arrow-function variables hide their name in stack traces and prevent hoisting — use a function declaration instead. | Replace `const foo = (…) => { … }` at module scope with `function foo(…) { … }`. Keep arrow functions for callbacks and inline expressions. |
 
 ## tailwind
@@ -2432,7 +2457,7 @@
 | `test-check-exception` | `.toThrow()` without specifying what to check. | Specify the expected error: `.toThrow(TypeError)`, `.toThrow('message')`, or `.toThrow(/regex/)`. Bare `.toThrow()` passes for any error, hiding bugs. |
 | `testing-no-concurrent-without-context-expect` | test.concurrent must destructure { expect } from the test context — the module-level expect is not scoped per concurrent test. | Destructure expect from the test context: test.concurrent('...', ({ expect }) => { ... }) |
 | `testing-no-conditional-assertion` | Assertions inside if-branches silently skip when the branch is not taken — the test passes but checks nothing. | Make the assertion unconditional. If the branch depends on input, split into separate tests or use expect.soft / describe.each. |
-| `testing-no-mocking-internal-modules` | Mocking a relative internal module couples tests to implementation details. | Mock only external boundaries (HTTP, DB, third-party SDKs). Refactor so the collaborator is injected, or rely on the real internal module. |
+| `testing-no-mocking-internal-modules` | Mocking a relative internal module (or any package, under `include_packages`) couples tests to implementation details. | Mock only external boundaries (HTTP, DB, third-party SDKs). Refactor so the collaborator is injected, or rely on the real internal module. |
 | `testing-no-mocktimers-without-restore` | useFakeTimers() without a matching useRealTimers() in afterEach/afterAll leaks mocked timers into sibling tests. | Call vi.useRealTimers() (or jest.useRealTimers()) in afterEach/afterAll to restore the real timers. |
 | `testing-no-real-external-service` | Test makes a real network call to an external service — intercept it with MSW instead. | Mock the external service with MSW (or equivalent) — never hit the real endpoint from tests. |
 | `testing-no-shared-state` | Top-level let/var mutated across test() blocks without being reset in beforeEach — tests become order-dependent. | Move the variable inside each test, or reset it in beforeEach(). Prefer fresh state per test over shared mutable state. |
@@ -2499,6 +2524,7 @@
 | `max-params` | Functions should take at most 4 positional arguments. | If you need more than 4 parameters, pack them into an options object — named fields carry intent where positional arguments don't. |
 | `no-alert` | `alert`, `confirm`, and `prompt` block the UI thread. | Replace `alert`/`confirm`/`prompt` with a non-blocking UI component. These browser dialogs freeze the page and rarely belong in shipped code. |
 | `no-async-promise-executor` | The `Promise` executor must not be `async`. | Remove `async` from the `new Promise(async (resolve) => ...)` executor. Errors thrown inside an async executor are swallowed and never reject the promise. |
+| `no-chained-type-assertions` | A chained type assertion asserts a type nothing checked. | Parse the value into the target type instead of asserting through another type. |
 | `no-class-assign` | A class binding must not be reassigned. | Don't assign to a `class` declaration's name. Reassigning it shadows the class and is almost always a mistake. |
 | `no-compare-neg-zero` | Comparing against `-0` is misleading. | Replace `x === -0` with `Object.is(x, -0)`. The `===` operator treats `-0` and `0` as equal, so the comparison never does what it looks like. |
 | `no-conditional-async-return` | Function returns `T` on one branch and `Promise<T>` on another — always return a promise for consistency. | If the function is async, every branch must return a value (or `await` a promise). If sync, don't return a promise on some branches. |
@@ -2528,6 +2554,7 @@
 | `no-inline-param-type` | Inline object types in parameters resist reuse and refactoring. | Extract the inline type to a named `type` declaration above the function. A named type has an identity, can be shared across call sites, and shows up in IDE hover. |
 | `no-irregular-whitespace` | Irregular whitespace characters break tooling. | Replace non-standard whitespace such as a non-breaking or zero-width space with a regular space. Invisible characters cause confusing parse and diff errors. |
 | `no-json-parse-cast` | `JSON.parse(x) as T` is a lie — validate the runtime shape. | Replace the cast with runtime validation: `const parsed = UserSchema.safeParse(JSON.parse(raw))` (Zod) or a hand-written type guard that inspects the value. |
+| `no-known-value-widening` | An annotation widens a literal value the compiler already knew. | Drop the annotation, or write `as const` / `satisfies T` to keep the literal type. |
 | `no-label-var` | A label must not share a name with an in-scope variable. | Rename the label or the variable. Reusing the same name makes `break name` ambiguous to readers. |
 | `no-lone-blocks` | A standalone block with no block-scoped declarations is dead structure. | Remove the redundant `{ }`. A bare block only matters when it scopes `let`/`const`/`class`; otherwise it just adds indentation. |
 | `no-multi-assign` | Chained assignments hide what is being set. | Split `a = b = c` into separate statements. Chained assignment obscures which variables are declared and which are mutated. |
@@ -2540,6 +2567,7 @@
 | `no-process-global` | Usage of the Node `process` global is discouraged — it is hard for tools to statically analyze. | Import `process` explicitly with `import process from "node:process";` instead of relying on the implicit global. |
 | `no-redundant-optional` | `prop?: Type \| undefined` — the `?` already implies `\| undefined` (unless tsconfig sets `exactOptionalPropertyTypes`). | Remove `\| undefined` from the type, or remove the `?` from the property name. |
 | `no-return-type-any` | Functions with explicit `: any` return type defeat type safety. | Replace `: any` with a specific return type or use `unknown` if the type is truly dynamic. |
+| `no-runtime-typeof` | A runtime `typeof` re-checks by hand what a parsed type guarantees. | Parse the value at its boundary into a typed value, then trust the type. |
 | `no-self-assign` | Assigning a variable to itself does nothing. | Remove the `x = x` assignment or fix the typo — you likely meant a different value or property. |
 | `no-self-compare` | Comparing a value with itself is trivially true or false. | Replace `x === x` with the intended operands. The only real use, NaN detection, is clearer as `Number.isNaN(x)`. |
 | `no-sequences` | The comma operator hides multiple expressions in one. | Split comma-separated expressions into separate statements. The comma operator evaluates each and returns the last, which surprises most readers. |
@@ -2550,14 +2578,17 @@
 | `no-type-assertion` | Bans all `as T` type assertions. | Use `satisfies T` for validation, type guards for narrowing, or generics for polymorphism. |
 | `no-typeof-prefer-schema` | Validating the shape of freshly-deserialized data (`JSON.parse`, `response.json()`) with chained `typeof` checks is error-prone — use a schema validator (zod, valibot, …). | Replace the chained `typeof` checks with a schema parsed at the boundary, e.g. `const User = z.object({ name: z.string(), age: z.number() }); User.parse(data)`. A single `typeof x === 'string'` narrowing is fine — this targets multi-property shape checks. |
 | `no-unassigned-vars` | A variable that is read but never assigned is always undefined. | Assign the variable a value or remove it. A `let`/`var` that is only ever read holds `undefined`, usually a forgotten assignment. |
+| `no-unknown-parameters` | A parameter declared `unknown` accepts an unparsed value. | Accept a named domain type, and parse external input at its boundary. |
 | `no-unknown-returns` | A declared `unknown` return hands the caller an unparsed value. | Return a named domain type, and parse the value where it is produced. |
 | `no-unknown-type-aliases` | A type alias resolving to `unknown` names a decision that was never made. | Name the type the value actually has, and narrow at the parsing boundary. |
 | `no-unreachable` | Code after a terminating statement never runs. | Remove the unreachable statements after a `return`/`throw`/`break`/`continue`, or fix the control flow that strands them. |
+| `no-unsafe-dictionary-type` | A dictionary type leaves every value untyped. | Give the dictionary a named value type, or model the object with known keys. |
 | `no-unused-labels` | A label that is never referenced is dead. | Remove the unused label. If you meant to jump to it, add the matching `break`/`continue`. |
 | `no-useless-catch` | A catch that only rethrows is pointless. | If the catch block just rethrows the original error, remove it — the error propagates identically without the ceremony. |
 | `no-useless-intersection` | Intersecting with `unknown` or `never` is useless — `& unknown` is a no-op, `& never` collapses to `never`. | Remove `& unknown` (no-op) or simplify `Foo & never` to `never`. |
 | `no-useless-rename` | Renaming a binding to the same name is redundant. | Simplify `{ foo: foo }` to `{ foo }` in imports, exports, and destructuring. Renaming a binding to itself is pure noise. |
 | `no-var` | Never declare variables with `var`. | Replace `var` with `const` (or `let` only when the binding actually needs to be reassigned). |
+| `no-widen-then-assert` | An assertion claims back the literal type an annotation widened away. | Drop the widening annotation so the `const` keeps its literal type. |
 | `object-shorthand` | Use shorthand for object properties and methods. | Write `{ foo }` instead of `{ foo: foo }` and `{ method() {} }` instead of `{ method: function () {} }`. Shorthand is the consistent, modern form. |
 | `operator-assignment` | Prefer compound assignment operators. | Replace `x = x + 1` with `x += 1`, and likewise for the other operators. Shorthand states the intent and avoids repeating the target. |
 | `option-vs-result` | Functions named `find*`/`get*` returning `null`/`undefined` should use an Option type. | Wrap the return value in an Option/Result type instead of returning bare `null` or `undefined`. This makes the absence of a value explicit in the type system. |
@@ -2576,6 +2607,7 @@
 | `promise/param-names` | Promise discipline — avoid classic async footguns. | Name Promise executor parameters `resolve` and `reject`. Any other names confuse reviewers. |
 | `public-static-readonly` | `public static` fields without `readonly` allow accidental mutation. | Add `readonly` to `public static` fields: `public static readonly X = ...`. |
 | `redundant-type-aliases` | `type X = Y` where Y is a single type adds no structure — it's just renaming. | Use the original type directly, or add structure (union, intersection, generics) to justify the alias. |
+| `require-safety-comment-for-type-assertion` | A type assertion carries no comment saying why it holds. | Write the marker comment (default `// SAFETY:`) with the reason above the assertion. |
 | `symbol-description` | Every `Symbol()` should carry a description. | Pass a description to `Symbol('...')`. The description is the only thing that identifies a symbol when debugging. |
 | `ts-adjacent-overload-signatures` | Function overload signatures must be consecutive for readability. | Move all overload signatures for the same function name next to each other. |
 | `ts-ban-ts-comment` | `@ts-ignore` and `@ts-nocheck` suppress compiler errors and hide bugs. | Fix the underlying type error, or use `@ts-expect-error` with a description. |
@@ -2810,7 +2842,7 @@
 | `ui-no-justified-text` | `textAlign: 'justify'` without `hyphens: 'auto'` — produces rivers of whitespace. | Either drop `textAlign: 'justify'` or pair it with `hyphens: 'auto'` so the browser can break long words and avoid awkward spacing. |
 | `ui-no-keyframes-for-interruptible` | Class-toggled (state-driven) animations should use `transition`; `@keyframes` can't interrupt mid-flight. | Replace the `@keyframes` + `animation:` pair with `transition` on the same properties so toggles interpolate from the current value. |
 | `ui-no-large-animated-blur` | Inline `filter: blur(Npx)` with N > 20 — expensive, escalates with radius and layer size, can exhaust GPU memory on mobile. | Reduce the blur radius below 20px, or composite the blur statically into a background image. |
-| `ui-no-layout-property-animation` | Inline `transition` references a layout-triggering property — animating layout causes per-frame layout recalculation. | Animate `transform`, `opacity`, `color`, `background`, or `filter` instead — they don't trigger layout. |
+| `ui-no-layout-property-animation` | Inline `transition` or a motion `animate`/`initial`/`exit`/`while*` prop references a layout-triggering property — animating layout causes per-frame layout recalculation. | Animate `transform`, `opacity`, `color`, `background`, or `filter` instead — they don't trigger layout. |
 | `ui-no-long-transition-duration` | Inline `transitionDuration`/`animationDuration` above 1s — feels sluggish. | Keep UI transitions under 1s (typically 150-400ms). Long durations block interaction and harm perceived performance. |
 | `ui-no-permanent-will-change` | Inline `willChange` is permanent — `will-change` should be applied dynamically, not baked into static styles. | Apply `will-change` only during the active animation (e.g. on hover/focus) and remove it after, or set it to `'auto'`. |
 | `ui-no-pure-black` | Pure black (`#000`, `rgb(0,0,0)`, `black`) looks harsh on screens — prefer a near-black. | Use a slightly warmer/softer tone such as `#0a0a0a` or an OKLCH near-black. |
