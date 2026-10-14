@@ -119,6 +119,12 @@ impl Config {
         &self.raw.entrypoints
     }
 
+    /// The `[clippy]` table, rendered as-is into the generated clippy.toml.
+    #[must_use]
+    pub fn clippy_passthrough(&self) -> &toml::Table {
+        &self.raw.clippy
+    }
+
     /// True if `rule_id` is enabled for `file_path`. Combines:
     ///   - global `[rules.<id>] disabled = true` (kills the rule everywhere)
     ///   - per-glob `[overrides."<g>"] disable = [<id>]` (kills it for matches)
@@ -484,6 +490,7 @@ fn merge(mut base: ComplyToml, user: ComplyToml) -> ComplyToml {
     for (glob, override_cfg) in user.overrides {
         base.overrides.insert(glob, override_cfg);
     }
+    base.clippy.extend(user.clippy);
     base
 }
 

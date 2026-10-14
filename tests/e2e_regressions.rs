@@ -637,3 +637,140 @@ fn two_staged_copies_are_reported_once_on_the_last_path_issue_8611() {
         assert!(files[0].ends_with("b.ts"), "{rule}: {stdout}");
     }
 }
+
+/// A one-crate workspace holding `files` (path, content).
+fn rust_crate(files: &[(&str, &str)]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    for (path, content) in files {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    dir
+}
+
+const LEN_ZERO_IN_TEST: &str =
+    "#[test]\nfn empty() {\n    let v: Vec<u8> = Vec::new();\n    assert!(v.len() == 0);\n}\n";
+
+#[test]
+fn disallowed_method_from_comply_toml_is_reported_issue_8614() {
+    let dir = rust_crate(&[
+        (
+            "comply.toml",
+            "[clippy]\ndisallowed-methods = [{ path = \"std::env::var\", reason = \"read Config\" }]\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub fn home() -> Option<String> {\n    std::env::var(\"HOME\").ok()\n}\n",
+        ),
+    ]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .assert()
+        .stdout(predicate::str::contains("clippy::disallowed_methods"))
+        .stdout(predicate::str::contains("read Config"));
+}
+
+#[test]
+fn project_clippy_toml_stops_comply_before_clippy_issue_8614() {
+    let dir = rust_crate(&[
+        (
+            "clippy.toml",
+            "disallowed-methods = [{ path = \"std::env::var\", reason = \"read Config\" }]\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub fn is_none(v: &[u8]) -> bool {\n    v.len() == 0\n}\n",
+        ),
+    ]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("clippy.toml"))
+        .stderr(predicate::str::contains("disallowed-methods"))
+        .stderr(predicate::str::contains("crashed unexpectedly").not())
+        .stdout(predicate::str::contains("clippy::").not());
+}
+
+#[test]
+fn clippy_reports_test_module_and_tests_dir_once_issue_8614() {
+    let lib = format!(
+        "pub fn one() -> u8 {{\n    1\n}}\n\n#[cfg(test)]\nmod tests {{\n{LEN_ZERO_IN_TEST}}}\n"
+    );
+    let dir = rust_crate(&[("src/lib.rs", &lib), ("tests/it.rs", LEN_ZERO_IN_TEST)]);
+
+    let output = common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let findings: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("clippy::len_zero"))
+        .collect();
+    assert_eq!(
+        findings.iter().filter(|l| l.contains("lib.rs")).count(),
+        1,
+        "{stdout}"
+    );
+    assert_eq!(
+        findings.iter().filter(|l| l.contains("it.rs")).count(),
+        1,
+        "{stdout}"
+    );
+}
+
+#[test]
+fn fix_rewrites_clippy_findings_in_tests_dir_issue_8614() {
+    let dir = rust_crate(&[
+        ("src/lib.rs", "pub fn one() -> u8 {\n    1\n}\n"),
+        ("tests/it.rs", LEN_ZERO_IN_TEST),
+    ]);
+
+    // `cargo clippy --fix` refuses a package outside any VCS.
+    git(dir.path(), &["init", "-q"]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .args(["--fix", "."])
+        .assert()
+        .stderr(predicate::str::contains("clippy --fix failed").not());
+
+    let fixed = fs::read_to_string(dir.path().join("tests/it.rs")).unwrap();
+    assert!(fixed.contains("is_empty()"), "{fixed}");
+}
+
+#[test]
+fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
+    // `manual_range_contains` needs Rust 1.35, so msrv 1.30 keeps the range.
+    let dir = rust_crate(&[
+        ("comply.toml", "[clippy]\nmsrv = \"1.30\"\n"),
+        (
+            "src/lib.rs",
+            "pub fn small(x: u32) -> bool {\n    x >= 1 && x < 10\n}\n\n\
+             pub fn none(v: &[u8]) -> bool {\n    v.len() == 0\n}\n",
+        ),
+    ]);
+    git(dir.path(), &["init", "-q"]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .args(["--fix", "."])
+        .assert()
+        .stderr(predicate::str::contains("clippy --fix failed").not());
+
+    let fixed = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert!(fixed.contains("is_empty()"), "{fixed}");
+    assert!(fixed.contains("x >= 1 && x < 10"), "{fixed}");
+}
