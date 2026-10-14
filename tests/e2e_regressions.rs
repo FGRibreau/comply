@@ -185,6 +185,49 @@ fn migration_lock_timeout_ignores_framework_package_dirs() {
 }
 
 #[test]
+fn sql_migration_rules_skip_test_dirs_and_host_code() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let both_defects = "ALTER TABLE t ADD CONSTRAINT t_a_chk CHECK (a > 0) NOT VALID;\n\
+                        ALTER TABLE t VALIDATE CONSTRAINT t_a_chk;\n\
+                        UPDATE t SET a = replace(a, 'x', 'y') WHERE id = 1;\n";
+    let update = "UPDATE t SET a = replace(a, 'x', 'y') WHERE id = 1";
+    for (path, content) in [
+        ("migrations/002.sql", both_defects.to_string()),
+        ("tests/migrations/002.sql", both_defects.to_string()),
+        ("src/fix.sql", both_defects.to_string()),
+        (
+            "migrations/001_fix.rs",
+            format!("fn up() {{ let q = \"{update}\"; }}\n"),
+        ),
+        (
+            "migrations/001_fix.ts",
+            format!("export const up = `{update}`;\n"),
+        ),
+    ] {
+        let file = dir.path().join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, content).unwrap();
+    }
+
+    let output = common::comply().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let flagged: Vec<&str> = stdout
+        .lines()
+        .filter(|line| {
+            line.contains("[sql-validate-constraint-separate-migration]")
+                || line.contains("[sql-update-replace-needs-row-check]")
+        })
+        .collect();
+    assert_eq!(flagged.len(), 2, "{stdout}");
+    assert!(
+        flagged
+            .iter()
+            .all(|line| line.contains("/migrations/002.sql") && !line.contains("/tests/")),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn vue_and_tsx_backends_of_a_rule_anchor_on_the_same_construct() {
     // One defect, one element, two file types: `a11y-alt-text` reports the
     // `<img` opening tag in both, so moving a component from `.tsx` to `.vue`
@@ -370,6 +413,152 @@ fn missing_type_aware_toolchain_is_an_instruction_not_a_crash_issue_8109() {
         .stderr(predicate::str::contains("github.com/rbaumier/comply/issues").not());
 }
 
+/// Enables the two opt-in French copy rules.
+const COPY_RULES_TOML: &str = "[rules.french-nbsp-before-punctuation]\ndisabled = false\n\
+    [rules.copy-apostrophe-style]\ndisabled = false\n";
+
+#[test]
+fn fix_rewrites_each_copy_finding_in_its_context_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    fs::write(
+        root.join("Page.tsx"),
+        "export function Page() { return <p aria-label=\"Quoi ?\">\
+         Attention : l'agent a\u{200b}b</p>; }\nexport const s = \"a\u{a0}b\";\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib.rs"), "pub const S: &str = \"a\u{a0}b\";\n").unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains(
+            "comply: rewrote 6 copy finding(s)",
+        ));
+    let page = fs::read_to_string(root.join("Page.tsx")).unwrap();
+    let lib = fs::read_to_string(root.join("lib.rs")).unwrap();
+    for fixed in [
+        "aria-label=\"Quoi&#8239;?\"",
+        "Attention&nbsp;: l’agent a&#x200B;b",
+        "\"a\\u00A0b\"",
+    ] {
+        assert!(page.contains(fixed), "{fixed} missing from {page}");
+    }
+    assert!(lib.contains("\"a\\u{a0}b\""), "{lib}");
+
+    common::comply().arg(root).assert().stdout(
+        predicate::str::contains("french-nbsp-before-punctuation")
+            .or(predicate::str::contains("no-raw-invisible-character"))
+            .or(predicate::str::contains("copy-apostrophe-style"))
+            .not(),
+    );
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains(
+            "comply: rewrote 0 copy finding(s)",
+        ));
+    assert_eq!(fs::read_to_string(root.join("Page.tsx")).unwrap(), page);
+    assert_eq!(fs::read_to_string(root.join("lib.rs")).unwrap(), lib);
+}
+
+#[test]
+fn staged_diff_only_fix_leaves_unchanged_lines_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    fs::create_dir(root.join("web")).unwrap();
+    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    fs::write(
+        root.join("web/Page.tsx"),
+        "export const A = <p>Avant : ok</p>;\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+
+    fs::write(
+        root.join("web/Page.tsx"),
+        "export const A = <p>Avant : ok</p>;\nexport const B = <p>Après : ok</p>;\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+
+    common::comply()
+        .current_dir(root)
+        .args(["--staged", "--diff-only", "--fix"])
+        .assert()
+        .stderr(predicate::str::contains(
+            "comply: rewrote 1 copy finding(s)",
+        ));
+    let page = fs::read_to_string(root.join("web/Page.tsx")).unwrap();
+    assert!(page.contains("Avant : ok"), "{page}");
+    assert!(page.contains("Après&nbsp;: ok"), "{page}");
+}
+
+#[test]
+fn fix_leaves_raw_literal_invisible_reported_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let rs = "pub const S: &str = r\"a\u{200b}b\";\n";
+    let ts = "export const t = String.raw`a\u{200b}b`;\n";
+    fs::write(root.join("lib.rs"), rs).unwrap();
+    fs::write(root.join("a.ts"), ts).unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stdout(predicate::str::contains("no-raw-invisible-character"));
+    assert_eq!(fs::read_to_string(root.join("lib.rs")).unwrap(), rs);
+    assert_eq!(fs::read_to_string(root.join("a.ts")).unwrap(), ts);
+}
+
+#[test]
+fn fix_still_runs_oxlint_fixers_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("a.ts"),
+        "export function f() { debugger; return 1; }\n",
+    )
+    .unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains("comply: ran 1 fixer(s)"));
+    let ts = fs::read_to_string(root.join("a.ts")).unwrap();
+    assert!(!ts.contains("debugger"), "{ts}");
+}
+
+#[test]
+fn fix_leaves_file_whose_fix_breaks_parse_issue_8610() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("comply.toml"),
+        "[rules.copy-apostrophe-style]\ndisabled = false\nstyle = \"straight\"\n",
+    )
+    .unwrap();
+    let tsx = "export const P = () => <i title='l’agent' />;\n";
+    fs::write(root.join("Page.tsx"), tsx).unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains("Page.tsx"))
+        .stdout(predicate::str::contains("copy-apostrophe-style"));
+    assert_eq!(fs::read_to_string(root.join("Page.tsx")).unwrap(), tsx);
+}
+
 #[test]
 fn ansi_fixture_does_not_cost_its_batch_its_diagnostics_issue_8402() {
     // oxlint's json writer echoes source text into `message` unescaped, so a
@@ -395,4 +584,236 @@ fn ansi_fixture_does_not_cost_its_batch_its_diagnostics_issue_8402() {
         .assert()
         .stdout(predicate::str::contains("no-debugger"))
         .stderr(predicate::str::contains("crashed unexpectedly").not());
+}
+
+/// One long exported function and one standalone comment.
+/// Copied verbatim, it trips all three cross-file duplicate rules.
+fn duplicated_module_8611() -> String {
+    let body: String = (0..25)
+        .map(|i| format!("  const value_{i} = computeExpensive(seed, \"param_{i}\");\n"))
+        .collect();
+    format!(
+        "export function computeEverything(seed: number): number {{\n{body}  return value_0 + value_24;\n}}\n\n\
+         // Retry budget reasoning: the upstream billing gateway throttles bursts above forty \
+         requests, so invoices travel in windows of eight with a pause between them.\n"
+    )
+}
+
+/// A git repository with `a.ts` committed, ready for staged changes.
+fn repo_with_committed_original_8611() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    fs::write(root.join("a.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+    dir
+}
+
+#[test]
+fn staged_copy_of_an_unchanged_function_is_reported_issue_8611() {
+    let dir = repo_with_committed_original_8611();
+    let root = dir.path();
+    fs::write(root.join("b.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "b.ts"]);
+
+    let on_b_naming_a = |rule: &str| {
+        predicate::str::is_match(format!(r"b\.ts:\d+:\d+: error \[{rule}\][^\n]*a\.ts")).unwrap()
+    };
+    common::comply()
+        .current_dir(root)
+        .args(["--staged", "--diff-only"])
+        .assert()
+        .failure()
+        .stdout(on_b_naming_a("no-duplicate-function"))
+        .stdout(on_b_naming_a("no-clones"))
+        .stdout(on_b_naming_a("no-duplicate-comments"));
+}
+
+#[test]
+fn unchanged_duplicates_stay_out_of_a_staged_scan_issue_8611() {
+    let dir = repo_with_committed_original_8611();
+    let root = dir.path();
+    fs::write(root.join("b.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "b.ts"]);
+    git(root, &["commit", "-qm", "copy"]);
+    fs::write(root.join("c.ts"), "export const unrelated = 1;\n").unwrap();
+    git(root, &["add", "c.ts"]);
+
+    common::comply()
+        .current_dir(root)
+        .arg("--staged")
+        .assert()
+        .stdout(predicate::str::contains("no-duplicate-function").not())
+        .stdout(predicate::str::contains("no-clones").not())
+        .stdout(predicate::str::contains("no-duplicate-comments").not());
+}
+
+#[test]
+fn two_staged_copies_are_reported_once_on_the_last_path_issue_8611() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    fs::write(root.join("a.ts"), duplicated_module_8611()).unwrap();
+    fs::write(root.join("b.ts"), duplicated_module_8611()).unwrap();
+    git(root, &["add", "a.ts", "b.ts"]);
+
+    let out = common::comply()
+        .current_dir(root)
+        .args(["--staged", "--diff-only", "--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let findings: Vec<serde_json::Value> = serde_json::from_str(&stdout).unwrap();
+    let on = |rule: &str| -> Vec<String> {
+        findings
+            .iter()
+            .filter(|f| f["ruleId"] == rule)
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for rule in ["no-duplicate-function", "no-clones"] {
+        let files = on(rule);
+        assert_eq!(files.len(), 1, "{rule}: {stdout}");
+        assert!(files[0].ends_with("b.ts"), "{rule}: {stdout}");
+    }
+}
+
+/// A one-crate workspace holding `files` (path, content).
+fn rust_crate(files: &[(&str, &str)]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    for (path, content) in files {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    dir
+}
+
+const LEN_ZERO_IN_TEST: &str =
+    "#[test]\nfn empty() {\n    let v: Vec<u8> = Vec::new();\n    assert!(v.len() == 0);\n}\n";
+
+#[test]
+fn disallowed_method_from_comply_toml_is_reported_issue_8614() {
+    let dir = rust_crate(&[
+        (
+            "comply.toml",
+            "[clippy]\ndisallowed-methods = [{ path = \"std::env::var\", reason = \"read Config\" }]\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub fn home() -> Option<String> {\n    std::env::var(\"HOME\").ok()\n}\n",
+        ),
+    ]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .assert()
+        .stdout(predicate::str::contains("clippy::disallowed_methods"))
+        .stdout(predicate::str::contains("read Config"));
+}
+
+#[test]
+fn project_clippy_toml_stops_comply_before_clippy_issue_8614() {
+    let dir = rust_crate(&[
+        (
+            "clippy.toml",
+            "disallowed-methods = [{ path = \"std::env::var\", reason = \"read Config\" }]\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub fn is_none(v: &[u8]) -> bool {\n    v.len() == 0\n}\n",
+        ),
+    ]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("clippy.toml"))
+        .stderr(predicate::str::contains("disallowed-methods"))
+        .stderr(predicate::str::contains("crashed unexpectedly").not())
+        .stdout(predicate::str::contains("clippy::").not());
+}
+
+#[test]
+fn clippy_reports_test_module_and_tests_dir_once_issue_8614() {
+    let lib = format!(
+        "pub fn one() -> u8 {{\n    1\n}}\n\n#[cfg(test)]\nmod tests {{\n{LEN_ZERO_IN_TEST}}}\n"
+    );
+    let dir = rust_crate(&[("src/lib.rs", &lib), ("tests/it.rs", LEN_ZERO_IN_TEST)]);
+
+    let output = common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let findings: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("clippy::len_zero"))
+        .collect();
+    assert_eq!(
+        findings.iter().filter(|l| l.contains("lib.rs")).count(),
+        1,
+        "{stdout}"
+    );
+    assert_eq!(
+        findings.iter().filter(|l| l.contains("it.rs")).count(),
+        1,
+        "{stdout}"
+    );
+}
+
+#[test]
+fn fix_rewrites_clippy_findings_in_tests_dir_issue_8614() {
+    let dir = rust_crate(&[
+        ("src/lib.rs", "pub fn one() -> u8 {\n    1\n}\n"),
+        ("tests/it.rs", LEN_ZERO_IN_TEST),
+    ]);
+
+    // `cargo clippy --fix` refuses a package outside any VCS.
+    git(dir.path(), &["init", "-q"]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .args(["--fix", "."])
+        .assert()
+        .stderr(predicate::str::contains("clippy --fix failed").not());
+
+    let fixed = fs::read_to_string(dir.path().join("tests/it.rs")).unwrap();
+    assert!(fixed.contains("is_empty()"), "{fixed}");
+}
+
+#[test]
+fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
+    // `manual_range_contains` needs Rust 1.35, so msrv 1.30 keeps the range.
+    let dir = rust_crate(&[
+        ("comply.toml", "[clippy]\nmsrv = \"1.30\"\n"),
+        (
+            "src/lib.rs",
+            "pub fn small(x: u32) -> bool {\n    x >= 1 && x < 10\n}\n\n\
+             pub fn none(v: &[u8]) -> bool {\n    v.len() == 0\n}\n",
+        ),
+    ]);
+    git(dir.path(), &["init", "-q"]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .args(["--fix", "."])
+        .assert()
+        .stderr(predicate::str::contains("clippy --fix failed").not());
+
+    let fixed = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert!(fixed.contains("is_empty()"), "{fixed}");
+    assert!(fixed.contains("x >= 1 && x < 10"), "{fixed}");
 }

@@ -1,9 +1,8 @@
 //! rust-explicit-enum-match-arms backend.
 //!
-//! Walks every `match_expression`, looks at its arms, and flags a lone
-//! `_` arm when at least one other arm has a pattern that "looks like"
-//! an enum variant. See the module-level docblock in `mod.rs` for the
-//! heuristic rationale.
+//! Walks every `match_expression` and flags an unguarded `_` arm.
+//! Another arm must name a variant of a workspace enum.
+//! See the module-level docblock in `mod.rs` for the rationale.
 //!
 //! Pattern classification is purely syntactic:
 //!
@@ -25,39 +24,11 @@
 //!   Or-patterns (`Foo::A | Foo::B`) are unwrapped and any disjunct
 //!   that qualifies makes the whole arm enum-like.
 //!
-//! Matches whose enum-like arms all reference a known stdlib closed or
-//! non_exhaustive enum — `Result` (`Ok`/`Err`), `Option` (`Some`/`None`),
-//! or `std::io::ErrorKind` — are exempt: the wildcard there is idiomatic
-//! or compiler-mandated, and all arms of a `match` share one type. A glob
-//! or brace import (`use std::io::ErrorKind::*;`,
-//! `use std::io::ErrorKind::{NotFound, ..};`) strips the qualifier, leaving
-//! bare variant heads (`Unsupported`, `WriteZero`); these are recognized as
-//! ErrorKind when the file carries such an import and the head names a known
-//! ErrorKind variant.
-//!
-//! Matches whose enum-like arms are all externally rooted — every arm path
-//! leads with a lowercase crate-name segment (`multer::Error::FieldSizeExceeded`,
-//! `std::io::ErrorKind::NotFound`) that is not `crate`/`super`/`self` — are
-//! also exempt: the scrutinee enum is defined in a foreign crate, where an
-//! upstream author can add variants (and a `#[non_exhaustive]` enum makes the
-//! `_` arm compiler-mandated outright). The rule's premise — that listing
-//! every variant turns a new upstream variant into a compile error here — does
-//! not hold across the crate boundary, so the wildcard is correct.
-//!
-//! A PascalCase-rooted arm path (`Expr::Call`, `Value::Array`) reads as a local
-//! enum type, but the type may be pulled in from a foreign crate via a `use` import
-//! — either named (`use syn::{..., Expr, ...}`) or a glob (`use serde_json::*;`)
-//! rooted at an external crate. When every enum-like arm names a qualified enum
-//! whose type resolves — through this file's own imports — to such an external
-//! import, the scrutinee enum is foreign and the same cross-crate reasoning applies:
-//! the `_` arm is upstream-driven (and compiler-mandated for `#[non_exhaustive]`),
-//! so the match is exempt. A same-file `enum_item` of that name shadows a glob (and
-//! would clash with a named import), so a locally-defined enum still flags.
-//!
-//! Matches with a non-wildcard arm carrying a match guard (`pat if cond`)
-//! are exempt as a whole: a guarded arm never counts toward exhaustiveness
-//! (the guard may be false at runtime), so the `_` arm is compiler-mandated
-//! and listing every variant explicitly does not remove it.
+//! Only an enum declared in the Cargo workspace counts.
+//! This file's imports resolve each arm's enum.
+//! A named import decides, then a same-file enum, then globs.
+//! A dependency glob makes a local name ambiguous, never flagged.
+//! A guarded `_ if cond` arm is never flagged.
 //!
 //! A wildcard arm whose body is a single diverging or early-exit expression —
 //! a `unreachable!`/`panic!`/`unimplemented!`/`todo!`/`bail!` macro
@@ -90,11 +61,12 @@
 //! every `match_expression` independently, so each match is classified
 //! on its own arms.
 
+use rustc_hash::FxHashMap;
+
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::project::{EnumDecl, collect_enum_decls};
 use crate::rules::backend::{AstCheck, CheckCtx};
-use crate::rules::rust_helpers::{
-    arm_body_is_diverging, enum_has_cfg_gated_variant, has_clippy_allow, is_test_code,
-};
+use crate::rules::rust_helpers::{arm_body_is_diverging, has_clippy_allow, is_test_code};
 
 #[derive(Debug)]
 pub struct Check;
@@ -104,11 +76,16 @@ impl AstCheck for Check {
         Some(&["match_expression"])
     }
 
+    // This file's enums, collected at its first enum-like `match`.
+    fn create_state(&self) -> Option<Box<dyn std::any::Any>> {
+        Some(Box::new(FileEnums::None))
+    }
+
     fn visit_node(
         &self,
         node: tree_sitter::Node,
         ctx: &CheckCtx,
-        _state: Option<&mut dyn std::any::Any>,
+        state: Option<&mut dyn std::any::Any>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let source_bytes = ctx.source.as_bytes();
@@ -150,19 +127,15 @@ impl AstCheck for Check {
             let Some(pattern) = child.child_by_field_name("pattern") else {
                 continue;
             };
-            // A match guard (`pat if cond => …`) on a non-wildcard arm
-            // never counts toward exhaustiveness — the guard may be false
-            // at runtime — so the compiler mandates a `_` arm regardless of
-            // how many variants are listed. Listing every variant
-            // explicitly does not remove that `_`, so flagging it is a
-            // false positive: skip the whole match, like the other
-            // whole-match exemptions.
-            if !pattern_is_wildcard(pattern, source_bytes)
-                && pattern_has_guard(pattern)
-            {
+            let is_wildcard = pattern_is_wildcard(pattern, source_bytes);
+            if is_wildcard && pattern_has_guard(pattern) {
+                continue;
+            }
+            // A guarded arm never counts toward exhaustiveness: the `_` stays.
+            if !is_wildcard && pattern_has_guard(pattern) {
                 return;
             }
-            if pattern_is_wildcard(pattern, source_bytes) {
+            if is_wildcard {
                 wildcard_arms.push(child);
             } else if pattern_is_enum_like(pattern, source_bytes) {
                 enum_like_arms.push(pattern);
@@ -186,70 +159,36 @@ impl AstCheck for Check {
         if enum_like_arms.is_empty() {
             return;
         }
-        // A glob (`use std::io::ErrorKind::*;`) or brace-list
-        // (`use std::io::ErrorKind::{NotFound, ..};`) import strips the
-        // `ErrorKind::` qualifier from arm heads, leaving bare variant names
-        // (`Unsupported`, `WriteZero`). Detecting the import lets the stdlib
-        // exemption below still recognize those bare heads as ErrorKind.
-        let error_kind_unqualified =
-            ctx.source.contains("ErrorKind::*") || ctx.source.contains("ErrorKind::{");
-        // All arms of a `match` necessarily cover the same type, so when
-        // every enum-like arm references a known stdlib closed or
-        // non_exhaustive enum, the scrutinee is that stdlib type and the
-        // wildcard is idiomatic (Result/Option) or compiler-mandated
-        // (ErrorKind) — never a silent catch-all for a project enum.
-        if enum_like_arms
-            .iter()
-            .all(|p| references_stdlib_closed_enum(*p, source_bytes, error_kind_unqualified))
-        {
-            return;
+        let mut source_file = node;
+        while let Some(parent) = source_file.parent() {
+            source_file = parent;
         }
-        // When every enum-like arm path is rooted at a foreign-crate segment
-        // (a lowercase crate name, not `crate`/`super`/`self`), the scrutinee
-        // enum is defined outside this crate. An upstream author can add
-        // variants, and a `#[non_exhaustive]` enum makes the `_` arm
-        // compiler-mandated — so listing every variant here never turns a new
-        // upstream variant into a compile error. The wildcard is correct.
-        // A mix of external and local arms is treated as local (likely a
-        // project enum), so the exemption requires *all* arms to be external.
-        if enum_like_arms
-            .iter()
-            .all(|p| arm_path_is_externally_rooted(*p, source_bytes))
-        {
-            return;
+        let mut uncached = FileEnums::None;
+        let cache = state
+            .and_then(|state| state.downcast_mut::<FileEnums>())
+            .unwrap_or(&mut uncached);
+        let local = &*cache.get_or_insert_with(|| collect_enum_decls(source_file, source_bytes));
+        let uses = scope_use_declarations(node);
+        let mut variant_patterns = Vec::new();
+        for pattern in &enum_like_arms {
+            push_variant_patterns(*pattern, source_bytes, &mut variant_patterns);
         }
-        // A PascalCase-rooted arm path (`Expr::Call`) reads as a local enum type,
-        // but the type may be imported unqualified from a foreign crate
-        // (`use syn::{..., Expr, ...}`). When every enum-like arm names a qualified
-        // enum whose type resolves — through this file's own `use` imports — to an
-        // external crate, the scrutinee enum is foreign: an upstream author can add
-        // variants and a `#[non_exhaustive]` enum makes the `_` arm
-        // compiler-mandated, so listing every variant never turns an upstream
-        // addition into a compile error here. Skip the whole match.
-        if match_covers_externally_imported_enum(node, &enum_like_arms, source_bytes) {
-            return;
+        let mut has_workspace_arm = false;
+        for pattern in variant_patterns {
+            match resolve_variant_enum(pattern, source_file, &uses, local, ctx) {
+                ArmEnum::Unsettled => return,
+                ArmEnum::Foreign => {}
+                ArmEnum::Workspace { decl, cross_crate } => {
+                    // A cfg-gated or cross-crate `#[non_exhaustive]` enum mandates `_`.
+                    let cross_crate_non_exhaustive = cross_crate && decl.non_exhaustive;
+                    if decl.cfg_gated || cross_crate_non_exhaustive {
+                        return;
+                    }
+                    has_workspace_arm = true;
+                }
+            }
         }
-        // A glob import (`use ndk::audio::AudioError::*;`) strips the enum
-        // qualifier, leaving bare unqualified variant heads (`Disconnected`,
-        // `Unavailable`). When every enum-like arm is such a bare head and the
-        // file carries a glob import rooted at an external crate, the scrutinee
-        // enum is defined upstream: an author can add variants and a
-        // `#[non_exhaustive]` enum makes the `_` arm compiler-mandated, so the
-        // wildcard is correct. A glob rooted at `crate`/`super`/`self` is a local
-        // enum and does not qualify, and a bare head naming a same-file enum
-        // variant is local too — both still flag.
-        if match_covers_glob_imported_external_enum(node, &enum_like_arms, source_bytes) {
-            return;
-        }
-        // If the scrutinee enum has a `#[cfg(...)]`-gated variant, its variant
-        // set is target-dependent: listing every variant explicitly fails to
-        // compile on the excluded target (the gated variant is absent there), so
-        // a wildcard `_` is the portable, compiler-required way to match it. The
-        // enum name is read from the qualified arm patterns
-        // (`Addr::SocketAddr` → `Addr`) and resolved against this file's
-        // `enum_item` definitions first, then against the enclosing crate's.
-        // Skip the whole match, like the other whole-match exemptions.
-        if match_covers_cfg_gated_enum(node, &enum_like_arms, source_bytes, ctx) {
+        if !has_workspace_arm {
             return;
         }
         // If the scrutinee enum is declared inside a `#[cxx::bridge]` module in
@@ -327,8 +266,14 @@ impl AstCheck for Check {
     }
 }
 
-/// True if `pattern` is a bare wildcard `_`.
+/// True if `pattern` is a bare wildcard `_`, guarded or not.
 fn pattern_is_wildcard(pattern: tree_sitter::Node, source: &[u8]) -> bool {
+    // The grammar's `_` is an anonymous token, first child of `match_pattern`.
+    let pattern = if pattern.kind() == "match_pattern" {
+        pattern.child(0).unwrap_or(pattern)
+    } else {
+        pattern
+    };
     if pattern.kind() == "wildcard_pattern" {
         return true;
     }
@@ -483,282 +428,278 @@ fn is_screaming_snake_const(segment: &str) -> bool {
         && !segment.chars().any(|c| c.is_ascii_lowercase())
 }
 
-/// Stable `std::io::ErrorKind` variant names. Used only to recognize a bare
-/// (unqualified) arm head as an ErrorKind variant when the file imports the
-/// enum unqualified (`use std::io::ErrorKind::*;` or a brace list).
-const ERROR_KIND_VARIANTS: &[&str] = &[
-    "NotFound",
-    "PermissionDenied",
-    "ConnectionRefused",
-    "ConnectionReset",
-    "ConnectionAborted",
-    "NotConnected",
-    "AddrInUse",
-    "AddrNotAvailable",
-    "BrokenPipe",
-    "AlreadyExists",
-    "WouldBlock",
-    "InvalidInput",
-    "InvalidData",
-    "TimedOut",
-    "WriteZero",
-    "Interrupted",
-    "Unsupported",
-    "UnexpectedEof",
-    "OutOfMemory",
-    "Other",
-];
+/// The enums this file declares; `None` until first needed.
+type FileEnums = Option<FxHashMap<String, EnumDecl>>;
 
-/// True if `pattern` references a variant of a known stdlib closed or
-/// non_exhaustive enum: `Result` (`Ok`/`Err`), `Option` (`Some`/`None`),
-/// or `std::io::ErrorKind`. Matching is purely syntactic: the final path
-/// segment of the variant head must be exactly one of the Result/Option
-/// constructors, or the head must contain `ErrorKind::`.
-///
-/// When `error_kind_unqualified` is true (the file glob- or brace-imports
-/// `std::io::ErrorKind`, stripping the `ErrorKind::` qualifier), a bare head
-/// that names a known `ErrorKind` variant (`Unsupported`, `WriteZero`) also
-/// qualifies — the scrutinee is the `#[non_exhaustive]` `ErrorKind`, so the
-/// `_` arm is compiler-mandated. The exemption keys on both the import and a
-/// known variant name, so a local enum whose variants are not ErrorKind names
-/// is unaffected.
-fn references_stdlib_closed_enum(
-    pattern: tree_sitter::Node,
-    source: &[u8],
-    error_kind_unqualified: bool,
-) -> bool {
-    // Unwrap the `match_pattern` wrapper, mirroring `pattern_is_enum_like`.
-    if pattern.kind() == "match_pattern" {
-        let mut cursor = pattern.walk();
-        if let Some(inner) = pattern.named_children(&mut cursor).next() {
-            return references_stdlib_closed_enum(inner, source, error_kind_unqualified);
-        }
-        return false;
-    }
-    // Or-pattern: every disjunct must reference a stdlib enum.
-    if pattern.kind() == "or_pattern" {
-        let mut cursor = pattern.walk();
-        return pattern
-            .named_children(&mut cursor)
-            .all(|child| references_stdlib_closed_enum(child, source, error_kind_unqualified));
-    }
-
-    let Ok(text) = pattern.utf8_text(source) else {
-        return false;
-    };
-    let text = text.trim();
-    // Strip tuple-struct fields: `Err(e)` → `Err`, `Some(v)` → `Some`.
-    let head = text.split('(').next().unwrap_or(text).trim();
-    // Final path segment: `Result::Ok` → `Ok`, `Option::Some` → `Some`.
-    let last_seg = head.rsplit("::").next().unwrap_or(head).trim();
-    if matches!(last_seg, "Ok" | "Err" | "Some" | "None") {
-        return true;
-    }
-    // `std::io::ErrorKind` is #[non_exhaustive]: a `_` arm is mandatory.
-    if head.contains("ErrorKind::") {
-        return true;
-    }
-    // Unqualified import (`use std::io::ErrorKind::*;` / brace list): a bare
-    // head naming a known ErrorKind variant is the same #[non_exhaustive] enum.
-    error_kind_unqualified && ERROR_KIND_VARIANTS.contains(&last_seg)
+/// The enum a variant pattern names, per this file's imports.
+#[derive(Debug, Clone, Copy)]
+enum ArmEnum {
+    /// Declared in the workspace.
+    Workspace {
+        decl: EnumDecl,
+        cross_crate: bool,
+    },
+    /// Imports allow both a workspace enum and a dependency.
+    Unsettled,
+    Foreign,
 }
 
-/// True if `pattern`'s head path is rooted at a foreign-crate segment: its
-/// leading path segment is a lowercase ASCII crate name (`multer`, `std`,
-/// `tokio`) that is not `crate`/`super`/`self`. Such a path
-/// (`multer::Error::FieldSizeExceeded`) names a variant of an enum defined in
-/// another crate, where the `_` arm is upstream-driven (compiler-mandated for
-/// `#[non_exhaustive]`). PascalCase-rooted (`Direction::North` → the local
-/// enum type), bare-unqualified (`Variant`), and `Self`/`crate`/`super`/`self`
-/// paths are all not external.
-///
-/// Accepted limitation: a relative *local* module path with a lowercase root
-/// and no `crate::` prefix (`some_mod::E::Variant`) reads as external here.
-/// That is a rare under-flag in the safe direction, far less common than the
-/// cross-crate case this targets.
-fn arm_path_is_externally_rooted(pattern: tree_sitter::Node, source: &[u8]) -> bool {
-    // Unwrap the `match_pattern` wrapper, mirroring `pattern_is_enum_like`.
-    if pattern.kind() == "match_pattern" {
-        let mut cursor = pattern.walk();
-        if let Some(inner) = pattern.named_children(&mut cursor).next() {
-            return arm_path_is_externally_rooted(inner, source);
-        }
-        return false;
-    }
-    // Or-pattern: every disjunct must be externally rooted.
-    if pattern.kind() == "or_pattern" {
-        let mut cursor = pattern.walk();
-        return pattern
-            .named_children(&mut cursor)
-            .all(|child| arm_path_is_externally_rooted(child, source));
-    }
-
-    let Ok(text) = pattern.utf8_text(source) else {
-        return false;
-    };
-    let text = text.trim();
-    // Strip tuple-struct / struct fields and any guard: `multer::Error::E(_)`
-    // → `multer::Error::E`. A path must be qualified (`::`) to have a root.
-    let head = text.split(['(', '{', ' ']).next().unwrap_or(text).trim();
-    let Some(root) = head.split("::").next() else {
-        return false;
-    };
-    let root = root.trim();
-    if matches!(root, "crate" | "super" | "self" | "Self") {
-        return false;
-    }
-    // Crate-name convention: a leading lowercase ASCII identifier. A
-    // PascalCase root (`Direction`) is the local enum type, not a crate.
-    root.starts_with(|c: char| c.is_ascii_lowercase())
-        && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// True if the match's scrutinee is an enum whose type name is brought into scope
-/// from an external crate — either imported unqualified (`use syn::{..., Expr}`) or
-/// exposed by a glob (`use serde_json::*;`).
-///
-/// A PascalCase-rooted arm path (`Expr::Call`, `Value::Array`) reads as a local
-/// enum type, so it escapes `arm_path_is_externally_rooted`; this complementary
-/// check resolves the type through the file's own imports. Reads the enum name from
-/// each qualified arm pattern (`Value::Array` → `Value`) and requires *every*
-/// enum-like arm to be qualified — a bare variant (`North`) leaves the enum
-/// unresolved. The match is exempt only when each distinct enum name resolves, via
-/// `enum_name_is_externally_imported`, to an external import. A name that a same-file
-/// `enum_item` defines is treated as local (it shadows any glob and would clash with
-/// a named import), so a match over a locally-defined enum still flags.
-fn match_covers_externally_imported_enum(
-    match_node: tree_sitter::Node,
-    enum_like_arms: &[tree_sitter::Node],
+/// Pushes the enum-like leaves of `pattern`, unwrapping `&` and `|`.
+fn push_variant_patterns<'t>(
+    pattern: tree_sitter::Node<'t>,
     source: &[u8],
-) -> bool {
-    let names: Vec<&str> = enum_like_arms
-        .iter()
-        .filter_map(|p| qualified_enum_name(*p, source))
-        .collect();
-    if names.is_empty() || names.len() != enum_like_arms.len() {
-        return false;
-    }
-    let mut current = match_node.parent();
-    while let Some(node) = current {
-        if node.kind() == "source_file" {
-            return names
-                .iter()
-                .all(|name| enum_name_is_externally_imported(node, name, source));
-        }
-        current = node.parent();
-    }
-    false
-}
-
-/// True if `name` (a PascalCase enum type like `Expr` or `Value`) resolves, through
-/// this file's own imports, to an enum defined in an external crate:
-///
-/// - a named import (`use syn::Expr;`, `use syn::{Block, Expr}`) binds `name`
-///   directly; the enum is foreign iff that import is rooted at an external crate.
-///   A local-rooted named import (`use crate::ast::Expr;`) binds `name` to a
-///   same-crate type, so the match stays local and the glob fallback does not apply.
-/// - with no named import of `name`, a glob import (`use serde_json::*;`) rooted at
-///   an external crate exposes `name` through a `use_wildcard` node rather than a
-///   named leaf; the enum is foreign when such a glob exists and no same-file
-///   `enum_item` is named `name` (a local `enum <name>` shadows the glob).
-fn enum_name_is_externally_imported(
-    source_file: tree_sitter::Node,
-    name: &str,
-    source: &[u8],
-) -> bool {
-    let mut cursor = source_file.walk();
-    let mut stack = vec![source_file];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "use_declaration" {
-            // A named import binds `name` to one concrete source, settling the type:
-            // the enum is foreign iff that import is rooted at an external crate.
-            // Either way the name is resolved, so the glob fallback below — which
-            // only matters when nothing names the type — does not apply.
-            if use_declaration_imports_name(node, name, source) {
-                return use_declaration_has_external_root(node, source);
+    out: &mut Vec<tree_sitter::Node<'t>>,
+) {
+    match pattern.kind() {
+        "match_pattern" | "reference_pattern" => {
+            if let Some(inner) = pattern.named_child(0) {
+                push_variant_patterns(inner, source, out);
             }
-            // A `use` tree contains no nested `use_declaration`, so stop here.
-            continue;
         }
-        for child in node.named_children(&mut cursor) {
-            stack.push(child);
+        "or_pattern" => {
+            let mut cursor = pattern.walk();
+            for child in pattern.named_children(&mut cursor) {
+                push_variant_patterns(child, source, out);
+            }
+        }
+        _ => {
+            if pattern_is_enum_like(pattern, source) {
+                out.push(pattern);
+            }
         }
     }
-    // No named import resolved `name`. A glob import (`use serde_json::*;`) exposes
-    // the type through a `use_wildcard` node that `use_declaration_imports_name`
-    // cannot see — resolve `name` through an external-rooted glob instead.
-    enum_name_is_glob_imported_external(source_file, name, source)
 }
 
-/// True if `name` is exposed by an external-rooted glob import (`use serde_json::*;`)
-/// and is NOT defined by any same-file `enum_item`. A local `enum <name>` takes
-/// precedence over a glob import, so its presence keeps the match local and the `_`
-/// arm a real catch-all; only an absent local definition leaves the qualified arms
-/// resolving to the foreign enum, where the `_` arm is upstream-driven.
-fn enum_name_is_glob_imported_external(
+/// Resolves the enum of one variant pattern (`r::E::V`, `E::V`, `V`).
+fn resolve_variant_enum(
+    pattern: tree_sitter::Node,
     source_file: tree_sitter::Node,
-    name: &str,
-    source: &[u8],
-) -> bool {
-    source_file_has_external_glob_import(source_file, source)
-        && !source_file_defines_enum_named(source_file, name, source)
+    uses: &[tree_sitter::Node],
+    local: &FxHashMap<String, EnumDecl>,
+    ctx: &CheckCtx,
+) -> ArmEnum {
+    let Ok(text) = pattern.utf8_text(ctx.source.as_bytes()) else {
+        return ArmEnum::Foreign;
+    };
+    let head = text.trim().split(['(', '{', ' ']).next().unwrap_or(text);
+    let segments: Vec<&str> = head.split("::").map(str::trim).collect();
+    match segments.as_slice() {
+        [variant] => resolve_bare_variant(variant, source_file, uses, local, ctx),
+        ["Self", _] => {
+            impl_self_type(pattern, ctx.source.as_bytes()).map_or(ArmEnum::Foreign, |self_type| {
+                let path: Vec<&str> = self_type.split("::").map(str::trim).collect();
+                resolve_enum_path(&path, uses, local, ctx)
+            })
+        }
+        [path @ .., _] => resolve_enum_path(path, uses, local, ctx),
+        [] => ArmEnum::Foreign,
+    }
 }
 
-/// True if any `enum_item` in `source_file` is named `name`. Descends the whole
-/// subtree so an enum nested in a `mod` is found, mirroring the other same-file
-/// enum-definition walks.
-fn source_file_defines_enum_named(
+/// Resolves an enum path (`E`, `r::…::E`) to its crate.
+fn resolve_enum_path(
+    path: &[&str],
+    uses: &[tree_sitter::Node],
+    local: &FxHashMap<String, EnumDecl>,
+    ctx: &CheckCtx,
+) -> ArmEnum {
+    match path {
+        [name] => resolve_enum_name(name, uses, local, ctx),
+        [root, .., name] => workspace_enum(crate_of_root(root), name, local, ctx),
+        [] => ArmEnum::Foreign,
+    }
+}
+
+/// The type of the `impl` enclosing `node`, generics stripped.
+fn impl_self_type<'a>(node: tree_sitter::Node, source: &'a [u8]) -> Option<&'a str> {
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        if scope.kind() == "impl_item" {
+            let self_type = scope.child_by_field_name("type")?.utf8_text(source).ok()?;
+            return self_type.split('<').next();
+        }
+        current = scope.parent();
+    }
+    None
+}
+
+fn resolve_bare_variant(
+    variant: &str,
     source_file: tree_sitter::Node,
+    uses: &[tree_sitter::Node],
+    local: &FxHashMap<String, EnumDecl>,
+    ctx: &CheckCtx,
+) -> ArmEnum {
+    let source = ctx.source.as_bytes();
+    if let Some(enum_name) = enum_declaring_variant(source_file, variant, source) {
+        return workspace_enum(None, enum_name, local, ctx);
+    }
+    // A prelude or named-imported variant never comes from a glob.
+    if matches!(variant, "Some" | "None" | "Ok" | "Err")
+        || uses
+            .iter()
+            .any(|use_decl| use_declaration_imports_name(*use_decl, variant, source))
+    {
+        return ArmEnum::Foreign;
+    }
+    let globs: Vec<ArmEnum> = uses
+        .iter()
+        .filter_map(|use_decl| use_glob_path(*use_decl, source))
+        .filter_map(|path| {
+            let (prefix, name) = path
+                .rsplit_once("::")
+                .map_or((None, path), |(p, n)| (Some(p), n));
+            // A lowercase last segment is a module glob, not `E::*`.
+            if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                return None;
+            }
+            Some(match prefix {
+                None => resolve_enum_name(name, uses, local, ctx),
+                Some(prefix) => {
+                    let root = prefix.split("::").next().unwrap_or(prefix);
+                    workspace_enum(crate_of_root(root), name, local, ctx)
+                }
+            })
+        })
+        .collect();
+    let is_workspace = |resolved: &ArmEnum| matches!(resolved, ArmEnum::Workspace { .. });
+    let any_unsettled = globs
+        .iter()
+        .any(|resolved| matches!(resolved, ArmEnum::Unsettled));
+    match globs.iter().find(|resolved| is_workspace(resolved)) {
+        Some(workspace) if globs.iter().all(is_workspace) => *workspace,
+        Some(_) => ArmEnum::Unsettled,
+        None if any_unsettled => ArmEnum::Unsettled,
+        None => ArmEnum::Foreign,
+    }
+}
+
+fn resolve_enum_name(
     name: &str,
-    source: &[u8],
-) -> bool {
-    let mut cursor = source_file.walk();
-    let mut stack = vec![source_file];
+    uses: &[tree_sitter::Node],
+    local: &FxHashMap<String, EnumDecl>,
+    ctx: &CheckCtx,
+) -> ArmEnum {
+    let source = ctx.source.as_bytes();
+    if let Some(import) = uses
+        .iter()
+        .find(|use_decl| use_declaration_imports_name(**use_decl, name, source))
+    {
+        let crate_name = use_declaration_root(*import, source).and_then(crate_of_root);
+        let original = use_as_original(*import, name, source).unwrap_or(name);
+        return workspace_enum(crate_name, original, local, ctx);
+    }
+    if local.contains_key(name) {
+        return workspace_enum(None, name, local, ctx);
+    }
+    let mut has_dependency_glob = false;
+    for root in uses
+        .iter()
+        .filter(|use_decl| use_declaration_is_glob(**use_decl))
+        .filter_map(|use_decl| use_declaration_root(*use_decl, source))
+        .filter_map(crate_of_root)
+    {
+        let resolved = workspace_enum(Some(root), name, local, ctx);
+        if matches!(resolved, ArmEnum::Workspace { .. }) {
+            return resolved;
+        }
+        has_dependency_glob = true;
+    }
+    match workspace_enum(None, name, local, ctx) {
+        ArmEnum::Workspace { .. } if has_dependency_glob => ArmEnum::Unsettled,
+        resolved => resolved,
+    }
+}
+
+/// Looks up `name` in `crate_name`, or this file's crate.
+fn workspace_enum(
+    crate_name: Option<&str>,
+    name: &str,
+    local: &FxHashMap<String, EnumDecl>,
+    ctx: &CheckCtx,
+) -> ArmEnum {
+    let decl = match crate_name {
+        None => local
+            .get(name)
+            .or_else(|| ctx.project.rust_workspace_enum(ctx.path, None, name)),
+        Some(_) => ctx.project.rust_workspace_enum(ctx.path, crate_name, name),
+    };
+    decl.map_or(ArmEnum::Foreign, |decl| ArmEnum::Workspace {
+        decl: *decl,
+        cross_crate: crate_name.is_some(),
+    })
+}
+
+/// The crate a path root names: `None` for `crate`/`self`/`super`.
+fn crate_of_root(root: &str) -> Option<&str> {
+    (!matches!(root, "crate" | "self" | "super")).then_some(root)
+}
+
+/// The `use` declarations of `node`'s enclosing scopes, innermost first.
+fn scope_use_declarations(node: tree_sitter::Node) -> Vec<tree_sitter::Node> {
+    let mut uses = Vec::new();
+    let mut current = node.parent();
+    while let Some(scope) = current {
+        let mut cursor = scope.walk();
+        uses.extend(
+            scope
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "use_declaration"),
+        );
+        current = scope.parent();
+    }
+    uses
+}
+
+/// The original leaf of `use path::Original as alias;`.
+fn use_as_original<'a>(
+    use_decl: tree_sitter::Node,
+    alias: &str,
+    source: &'a [u8],
+) -> Option<&'a str> {
+    let mut cursor = use_decl.walk();
+    let mut stack = vec![use_decl];
     while let Some(node) = stack.pop() {
-        if node.kind() == "enum_item"
+        if node.kind() == "use_as_clause"
             && node
-                .child_by_field_name("name")
-                .and_then(|n| n.utf8_text(source).ok())
-                .is_some_and(|n| n == name)
+                .child_by_field_name("alias")
+                .and_then(|a| a.utf8_text(source).ok())
+                == Some(alias)
         {
-            return true;
+            let path = node.child_by_field_name("path")?.utf8_text(source).ok()?;
+            return path.rsplit("::").next();
         }
-        for child in node.named_children(&mut cursor) {
-            stack.push(child);
-        }
+        stack.extend(node.named_children(&mut cursor));
     }
-    false
+    None
 }
 
-/// True if a `use_declaration`'s leading path segment is an external crate name:
-/// a lowercase ASCII identifier that is not `crate`/`super`/`self`/`Self`. Mirrors
-/// the root classification in `arm_path_is_externally_rooted`.
-fn use_declaration_has_external_root(use_decl: tree_sitter::Node, source: &[u8]) -> bool {
-    let Ok(text) = use_decl.utf8_text(source) else {
-        return false;
-    };
-    let trimmed = text.trim_start();
-    // Strip a leading visibility modifier (`pub`, `pub(crate)`, …) and `use`.
-    let after_pub = trimmed
-        .strip_prefix("pub(crate)")
-        .or_else(|| trimmed.strip_prefix("pub(super)"))
-        .or_else(|| trimmed.strip_prefix("pub"))
-        .unwrap_or(trimmed)
-        .trim_start();
-    let Some(rest) = after_pub.strip_prefix("use") else {
-        return false;
-    };
-    let root = rest
-        .trim_start()
-        .split([':', '{', ' ', ';', '*'])
-        .next()
-        .unwrap_or("")
-        .trim();
-    if root.is_empty() || matches!(root, "crate" | "super" | "self" | "Self") {
-        return false;
+/// The path of a top-level glob `use a::b::*;` (`a::b`).
+fn use_glob_path<'a>(use_decl: tree_sitter::Node, source: &'a [u8]) -> Option<&'a str> {
+    let argument = use_decl.child_by_field_name("argument")?;
+    if argument.kind() != "use_wildcard" {
+        return None;
     }
-    root.starts_with(|c: char| c.is_ascii_lowercase())
-        && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    argument.utf8_text(source).ok()?.strip_suffix("::*")
+}
+
+fn use_declaration_root<'a>(use_decl: tree_sitter::Node, source: &'a [u8]) -> Option<&'a str> {
+    let text = use_decl.utf8_text(source).ok()?.trim_start();
+    // Strip a leading visibility modifier (`pub`, `pub(crate)`, …) and `use`.
+    let after_pub = text
+        .strip_prefix("pub(crate)")
+        .or_else(|| text.strip_prefix("pub(super)"))
+        .or_else(|| text.strip_prefix("pub"))
+        .unwrap_or(text)
+        .trim_start();
+    let root = after_pub
+        .strip_prefix("use")?
+        .trim_start()
+        .trim_start_matches("::")
+        .split([':', '{', ' ', ';', '*'])
+        .next()?
+        .trim();
+    (!root.is_empty()).then_some(root)
 }
 
 /// True if a `use_declaration` brings a leaf named `name` into scope. Walks the
@@ -791,112 +732,6 @@ fn use_declaration_imports_name(use_decl: tree_sitter::Node, name: &str, source:
     false
 }
 
-/// True if the match's enum-like arms are all bare unqualified variant heads
-/// (`Disconnected`, `Timeout(_)` — no `::` qualifier) and the file carries a glob
-/// import (`use <path>::*`) rooted at an external crate.
-///
-/// A glob import strips the enum qualifier, so the arm heads lose their crate
-/// root and read as local; this resolves them through the file's glob imports
-/// instead. The exemption requires the glob to be rooted at an external crate
-/// (not `crate`/`super`/`self`) and requires that no bare head names a same-file
-/// `enum_item` variant — a local enum coexisting with an unrelated external glob
-/// (`use std::io::ErrorKind::*;` next to a local `enum Color`) must still flag.
-///
-/// Accepted limitation: the external glob and the bare heads are correlated only
-/// file-wide, not resolved to one import. A match over a *local* enum whose
-/// variants are glob-imported from another file (`use crate::dir::Dir::*;`) while
-/// any unrelated external glob is also in scope reads as external here (a rare
-/// under-flag, the same safe direction the other heuristics tolerate); and a
-/// same-file enum variant that merely shares a name with a genuinely external
-/// variant defeats the exemption (a re-flag, the safe direction).
-fn match_covers_glob_imported_external_enum(
-    match_node: tree_sitter::Node,
-    enum_like_arms: &[tree_sitter::Node],
-    source: &[u8],
-) -> bool {
-    let mut heads: Vec<&str> = Vec::new();
-    if !enum_like_arms
-        .iter()
-        .all(|p| collect_bare_variant_heads(*p, source, &mut heads))
-    {
-        return false;
-    }
-    let mut current = match_node.parent();
-    while let Some(node) = current {
-        if node.kind() == "source_file" {
-            return source_file_has_external_glob_import(node, source)
-                && !source_file_defines_any_variant(node, &heads, source);
-        }
-        current = node.parent();
-    }
-    false
-}
-
-/// Pushes every variant head of `pattern` into `heads` and returns true iff every
-/// head is a bare unqualified PascalCase identifier (`Disconnected`, `Timeout(_)`
-/// — no `::`). A qualified head (`Foo::Bar`) returns false: it carries an enum
-/// root handled by the other external-resolution exemptions, so the bare-glob
-/// path does not apply. Unwraps the `match_pattern` wrapper and recurses through
-/// `or_pattern` disjuncts, mirroring the other arm-classification helpers.
-fn collect_bare_variant_heads<'a>(
-    pattern: tree_sitter::Node,
-    source: &'a [u8],
-    heads: &mut Vec<&'a str>,
-) -> bool {
-    if pattern.kind() == "match_pattern" {
-        let mut cursor = pattern.walk();
-        return match pattern.named_children(&mut cursor).next() {
-            Some(inner) => collect_bare_variant_heads(inner, source, heads),
-            None => false,
-        };
-    }
-    if pattern.kind() == "or_pattern" {
-        let mut cursor = pattern.walk();
-        return pattern
-            .named_children(&mut cursor)
-            .all(|child| collect_bare_variant_heads(child, source, heads));
-    }
-    let Ok(text) = pattern.utf8_text(source) else {
-        return false;
-    };
-    let head = text.trim().split(['(', '{', ' ']).next().unwrap_or("").trim();
-    if head.is_empty() || head.contains("::") {
-        return false;
-    }
-    // PascalCase: uppercase lead with at least one lowercase letter — the same
-    // bare-variant shape `pattern_is_enum_like` accepts.
-    if head.starts_with(|c: char| c.is_ascii_uppercase())
-        && head.chars().any(|c| c.is_ascii_lowercase())
-    {
-        heads.push(head);
-        true
-    } else {
-        false
-    }
-}
-
-/// True if any `use_declaration` in `source_file` is a glob import (`use ...::*`)
-/// rooted at an external crate. Mirrors `enum_name_is_externally_imported`'s walk
-/// and reuses `use_declaration_has_external_root` for the root classification, so
-/// a glob rooted at `crate`/`super`/`self` (a local enum) does not qualify.
-fn source_file_has_external_glob_import(source_file: tree_sitter::Node, source: &[u8]) -> bool {
-    let mut cursor = source_file.walk();
-    let mut stack = vec![source_file];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "use_declaration" {
-            if use_declaration_is_glob(node) && use_declaration_has_external_root(node, source) {
-                return true;
-            }
-            // A `use` tree contains no nested `use_declaration`, so stop here.
-            continue;
-        }
-        for child in node.named_children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-    false
-}
-
 /// True if a `use_declaration` is a glob import (`use path::*;`, or a nested
 /// `use path::{sub::*}`): its tree contains a `use_wildcard` node. A brace list
 /// with no wildcard (`use path::{A, B};`) is not a glob.
@@ -914,40 +749,38 @@ fn use_declaration_is_glob(use_decl: tree_sitter::Node) -> bool {
     false
 }
 
-/// True if any `enum_item` in `source_file` declares a variant whose name is in
-/// `variant_names`. Keeps the glob-import exemption from firing on a match over a
-/// locally-defined enum that merely coexists with an external glob import
-/// (`use std::io::ErrorKind::*;` next to a local `enum Color { Red, Green }`).
-fn source_file_defines_any_variant(
+fn enum_declaring_variant<'a>(
     source_file: tree_sitter::Node,
-    variant_names: &[&str],
-    source: &[u8],
-) -> bool {
+    variant: &str,
+    source: &'a [u8],
+) -> Option<&'a str> {
     let mut cursor = source_file.walk();
     let mut stack = vec![source_file];
     while let Some(node) = stack.pop() {
-        if node.kind() == "enum_item" {
-            if let Some(body) = node.child_by_field_name("body") {
-                let mut body_cursor = body.walk();
-                if body
-                    .named_children(&mut body_cursor)
-                    .filter(|c| c.kind() == "enum_variant")
-                    .any(|variant| {
-                        variant
-                            .child_by_field_name("name")
-                            .and_then(|n| n.utf8_text(source).ok())
-                            .is_some_and(|name| variant_names.contains(&name))
-                    })
-                {
-                    return true;
-                }
+        if node.kind() == "enum_item"
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            let mut body_cursor = body.walk();
+            let declares_variant = body
+                .named_children(&mut body_cursor)
+                .filter(|c| c.kind() == "enum_variant")
+                .any(|candidate| {
+                    candidate
+                        .child_by_field_name("name")
+                        .and_then(|n| n.utf8_text(source).ok())
+                        .is_some_and(|name| name == variant)
+                });
+            if declares_variant {
+                return node
+                    .child_by_field_name("name")
+                    .and_then(|n| n.utf8_text(source).ok());
             }
         }
         for child in node.named_children(&mut cursor) {
             stack.push(child);
         }
     }
-    false
+    None
 }
 
 /// Unwrap a `block` arm body to its implicit-return expression so a brace-wrapped
@@ -1118,50 +951,6 @@ fn attribute_item_is_cfg(attr_item: tree_sitter::Node, source: &[u8]) -> bool {
         .any(|path| matches!(path.utf8_text(source), Ok("cfg") | Ok("cfg_attr")))
 }
 
-/// True if the match's scrutinee is an enum with a `#[cfg(...)]`-gated variant.
-///
-/// Reads the enum names from the qualified `enum_like_arms` patterns
-/// (`Addr::SocketAddr(addr)` → `Addr`) and resolves them in two steps: this
-/// file's own `enum_item` definitions first, then — for an enum declared in a
-/// sibling file — the enclosing crate's, via the memoized project index. If the
-/// enum has a cfg-gated variant, the wildcard arm is portability-mandated. Bare
-/// unqualified variants (no `::`) carry no enum name to resolve and are ignored
-/// here — the match then falls through to normal flagging.
-fn match_covers_cfg_gated_enum(
-    match_node: tree_sitter::Node,
-    enum_like_arms: &[tree_sitter::Node],
-    source: &[u8],
-    ctx: &CheckCtx,
-) -> bool {
-    let names: Vec<&str> = enum_like_arms
-        .iter()
-        .filter_map(|p| qualified_enum_name(*p, source))
-        .collect();
-    if names.is_empty() {
-        return false;
-    }
-    // Same-file resolution is a subtree walk over an already-parsed tree; the
-    // crate-wide index parses every `.rs` file of the project on first use, so
-    // it is only consulted once the local definitions come up empty.
-    let mut current = match_node.parent();
-    while let Some(node) = current {
-        if node.kind() == "source_file" {
-            if source_file_has_cfg_gated_enum(node, &names, source) {
-                return true;
-            }
-            break;
-        }
-        current = node.parent();
-    }
-    // `Self` is a path keyword standing for the enclosing type, never an
-    // `enum_item` name: a `Self::Variant` match resolves in this file or not at
-    // all, so it must not pay for the crate-wide index.
-    names
-        .iter()
-        .filter(|name| **name != "Self")
-        .any(|name| ctx.project.crate_enum_has_cfg_gated_variant(ctx.path, name))
-}
-
 /// Extract the enum type name from a qualified variant pattern: the path
 /// segment immediately before the final `::variant` (`Addr::SocketAddr` →
 /// `Addr`, `crate::net::Addr::Unix` → `Addr`). Returns `None` for unqualified
@@ -1186,33 +975,6 @@ fn qualified_enum_name<'a>(pattern: tree_sitter::Node, source: &'a [u8]) -> Opti
     } else {
         Some(enum_name)
     }
-}
-
-/// True if any `enum_item` anywhere in `source_file` whose name is in `names`
-/// has a `#[cfg(...)]`-gated variant. Descends the whole subtree so an enum
-/// nested in a `mod` is found, not only top-level definitions.
-fn source_file_has_cfg_gated_enum(
-    source_file: tree_sitter::Node,
-    names: &[&str],
-    source: &[u8],
-) -> bool {
-    let mut cursor = source_file.walk();
-    let mut stack = vec![source_file];
-    while let Some(node) = stack.pop() {
-        if node.kind() == "enum_item"
-            && node
-                .child_by_field_name("name")
-                .and_then(|n| n.utf8_text(source).ok())
-                .is_some_and(|name| names.contains(&name))
-            && enum_has_cfg_gated_variant(node, source)
-        {
-            return true;
-        }
-        for child in node.named_children(&mut cursor) {
-            stack.push(child);
-        }
-    }
-    false
 }
 
 /// True if the match's scrutinee is an enum declared inside a `#[cxx::bridge]`
@@ -1349,7 +1111,8 @@ mod tests {
 
     #[test]
     fn flags_wildcard_with_enum_variants() {
-        let src = "fn f(x: Foo) -> i32 { match x { Foo::A => 1, Foo::B => 2, _ => 3 } }";
+        let src = "enum Foo { A, B, C }\n\
+                   fn f(x: Foo) -> i32 { match x { Foo::A => 1, Foo::B => 2, _ => 3 } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -1380,13 +1143,15 @@ mod tests {
 
     #[test]
     fn flags_project_variant_resembling_ok() {
-        let src = "fn f(x: Foo) -> i32 { match x { Foo::OkResponse => 1, _ => 0 } }";
+        let src = "enum Foo { OkResponse, Other }\n\
+                   fn f(x: Foo) -> i32 { match x { Foo::OkResponse => 1, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
     #[test]
     fn flags_wildcard_with_path_variants() {
-        let src = "fn f(x: Direction) -> i32 { match x { Direction::North => 1, _ => 0 } }";
+        let src = "enum Direction { North, South }\n\
+                   fn f(x: Direction) -> i32 { match x { Direction::North => 1, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -1601,7 +1366,8 @@ mod tests {
     fn flags_wildcard_arm_returning_plain_value() {
         // True positive: `_ => return 0` is NOT a failure/absence early-exit;
         // it returns a concrete value, swallowing the remaining enum variants.
-        let src = "fn f(x: Foo) -> i32 { match x { \
+        let src = "enum Foo { A, B, C }\n\
+                   fn f(x: Foo) -> i32 { match x { \
                    Foo::A => 1, Foo::B => 2, _ => return 0, } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1616,7 +1382,8 @@ mod tests {
     fn flags_wildcard_arm_with_ordinary_body() {
         // True positive: a lazy catch-all over an enum still fires even
         // though the diverging-arm exemption exists.
-        let src = "fn f(x: Foo) -> i32 { match x { Foo::A => 1, Foo::B => 2, _ => 0 } }";
+        let src = "enum Foo { A, B, C }\n\
+                   fn f(x: Foo) -> i32 { match x { Foo::A => 1, Foo::B => 2, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -1624,7 +1391,8 @@ mod tests {
     fn flags_wildcard_arm_doing_work_before_diverging() {
         // True positive: a block that runs other statements before
         // bailing is a real catch-all, not a bare guard.
-        let src = "fn f(x: Foo) -> Result<i32, E> { match x { \
+        let src = "enum Foo { A, B }\n\
+                   fn f(x: Foo) -> Result<i32, E> { match x { \
                    Foo::A => Ok(1), _ => { log(\"hit\"); bail!(\"unexpected\"); } } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1711,7 +1479,8 @@ mod tests {
         // not `Some(...)` (here `{ foo(); 42 }`) is not the accessor idiom, so the
         // wildcard over the enum is a real catch-all and must still flag — the
         // block-unwrap must not spuriously exempt it.
-        let src = "fn f(x: Foo) -> i32 { match x { \
+        let src = "enum Foo { A(i32), B, C }\n\
+                   fn f(x: Foo) -> i32 { match x { \
                    Foo::A(v) => { foo(); 42 }, Foo::B => 2, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1721,7 +1490,8 @@ mod tests {
         // Issue #6972 negative space: a `_ => Err(...)` wildcard with NO
         // `Ok(...)` arm is not the variant-accessor idiom — the non-wildcard
         // arms do other work, so the `_` arm is a real catch-all and still flags.
-        let src = "fn f(x: Foo) -> Result<i32, Foo> { match x { \
+        let src = "enum Foo { A, B, C }\n\
+                   fn f(x: Foo) -> Result<i32, Foo> { match x { \
                    Foo::A => bar(), Foo::B => baz(), _ => Err(x) } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1731,7 +1501,8 @@ mod tests {
         // Issue #6972 negative space: the exemption anchors on the wildcard body
         // being a call to `Err`. `Ok(v)` arms paired with a `_ => Ok(0)` wildcard
         // silently maps every new variant to `Ok(0)`, so it must still flag.
-        let src = "fn f(x: Foo) -> Result<i32, E> { match x { \
+        let src = "enum Foo { A, B, C }\n\
+                   fn f(x: Foo) -> Result<i32, E> { match x { \
                    Foo::A => Ok(1), Foo::B => Ok(2), _ => Ok(0) } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1740,7 +1511,8 @@ mod tests {
     fn flags_wildcard_arm_doing_real_work() {
         // Issue #1252 negative space (a): a `_` arm that calls a method is
         // a real catch-all, not a trivial accessor fallthrough.
-        let src = "fn f(x: Foo) -> i32 { match x { \
+        let src = "enum Foo { A(i32), B }\n\
+                   fn f(x: Foo) -> i32 { match x { \
                    Foo::A(v) => v, _ => self.compute() } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1749,7 +1521,8 @@ mod tests {
     fn flags_wildcard_arm_returning_nontrivial_value() {
         // Issue #1252 negative space (b): a `_` arm returning a non-trivial
         // constructed value over an enum still needs explicit variants.
-        let src = "fn f(x: Foo) -> Bar { match x { \
+        let src = "enum Foo { A, B }\n\
+                   fn f(x: Foo) -> Bar { match x { \
                    Foo::A => Bar::One, _ => Bar::build(x, 7) } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1789,7 +1562,8 @@ mod tests {
     fn flags_unguarded_enum_match_with_wildcard() {
         // Issue #3957 negative space: only a match guard exempts. An
         // unguarded enum match (variants + `_`) must still flag.
-        let src = "fn f(d: Direction) -> i32 { match d { \
+        let src = "enum Direction { North, South, East }\n\
+                   fn f(d: Direction) -> i32 { match d { \
                    Direction::North => 1, Direction::South => 2, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1832,7 +1606,8 @@ mod tests {
         // Issue #3918 negative space: only `cfg`/`cfg_attr` exempts. A
         // wildcard arm carrying an unrelated attribute (here one whose token
         // tree even contains the substring `cfg`) is still a lazy catch-all.
-        let src = "fn f(x: Foo) -> i32 { match x { \
+        let src = "enum Foo { A, B, C }\n\
+                   fn f(x: Foo) -> i32 { match x { \
                    Foo::A => 1, Foo::B => 2, \
                    #[allow(my_cfg_thing)] _ => 0, } }";
         assert_eq!(run_on(src).len(), 1);
@@ -1842,7 +1617,8 @@ mod tests {
     fn flags_wildcard_with_bare_pascal_case_variants() {
         // True positive: unqualified PascalCase variants (e.g. via
         // `use Direction::*`) still need explicit arms.
-        let src = "use Direction::*; \
+        let src = "enum Direction { North, South, East }\n\
+                   use Direction::*; \
                    fn f(x: Direction) -> i32 { match x { North => 1, South => 2, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -1879,10 +1655,9 @@ mod tests {
 
     #[test]
     fn flags_mixed_external_and_local_rooted_match() {
-        // Issue #3819 negative space: a mix of one externally-rooted arm and
-        // one local PascalCase-rooted arm is likely a local enum, so the
-        // exemption does not apply and the `_` arm still flags.
-        let src = "fn f(x: Foo) -> i32 { match x { \
+        // Issue #3819: one arm names a same-file enum, so `_` flags.
+        let src = "enum Direction { North, South }\n\
+                   fn f(x: Foo) -> i32 { match x { \
                    multer::Error::StreamReadFailed(_) => 1, \
                    Direction::North => 2, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
@@ -1903,10 +1678,7 @@ mod tests {
 
     #[test]
     fn flags_wildcard_on_same_file_pascal_enum_not_imported() {
-        // Issue #6158 negative space: a PascalCase enum defined in this file
-        // (not imported from any crate) has a developer-controlled variant set,
-        // so the `_` arm is a real catch-all and must still flag. The external
-        // exemption keys on an external `use` import, not on a PascalCase name.
+        // Issue #6158: a same-file enum is a workspace enum.
         let src = "enum Expr { Call(C), Path(P), Lit(L) }\n\
                    fn f(e: Expr) -> i32 { match e { Expr::Call(c) => 1, _ => 0, } }";
         assert_eq!(run_on(src).len(), 1);
@@ -1914,21 +1686,21 @@ mod tests {
 
     #[test]
     fn flags_wildcard_on_crate_imported_pascal_enum() {
-        // Issue #6158 negative space: an enum imported from a local path
-        // (`use crate::...`) is same-crate, so the `_` arm is a real catch-all.
-        // The exemption requires a `use` rooted at an external crate, not a
-        // `crate`/`super`/`self` root.
+        // Issue #6158: `use crate::…` resolves to this crate's declared enum.
         let src = "use crate::ast::Expr;\n\
                    fn f(e: Expr) -> i32 { match e { Expr::Call(c) => 1, _ => 0, } }";
-        assert_eq!(run_on(src).len(), 1);
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/ast.rs", "pub enum Expr { Call(C), Path(P) }"),
+            ("src/main.rs", src),
+        ]);
+        assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn flags_wildcard_when_external_use_only_qualifies_local_enum_name() {
-        // Issue #6158 review: a same-file enum `Bar` must still flag even when an
-        // unrelated external `use` mentions `Bar` only as a variant-import
-        // qualifier (`use foo::Bar::Variant`). `Bar` is a path segment there, not
-        // the imported leaf, so the external-import exemption must not fire.
+        // Issue #6158: `use foo::Bar::Variant` does not import `Bar` itself.
+        // The same-file `Bar` decides, so `_` flags.
         let src = "use foo::Bar::Variant;\n\
                    enum Bar { Call(C), Lit(L) }\n\
                    fn f(b: Bar) -> i32 { match b { Bar::Call(c) => 1, _ => 0, } }";
@@ -2032,9 +1804,7 @@ mod tests {
 
     #[test]
     fn flags_local_enum_without_error_kind_import() {
-        // Issue #3717 negative space: a local enum with a `_` arm and NO
-        // ErrorKind import still flags — bare `North`/`South` are not
-        // ErrorKind variant names, so the exemption does not apply.
+        // Issue #3717: bare `North`/`South` are variants of the same-file `Dir`.
         let src = "enum Dir { North, South, East, West }\n\
                    fn f(d: Dir) -> u8 { match d { North => 0, South => 1, _ => 2 } }";
         assert_eq!(run_on(src).len(), 1);
@@ -2042,10 +1812,7 @@ mod tests {
 
     #[test]
     fn flags_unrelated_enum_despite_error_kind_glob_import() {
-        // Issue #3717 negative space: even with a `use std::io::ErrorKind::*;`
-        // glob in the file, a different enum whose bare variants are not
-        // ErrorKind names (`Red`/`Green`) still flags — the exemption keys on
-        // BOTH the import and a known ErrorKind variant name.
+        // Issue #3717: the same-file `Color` declares `Red`, before any glob.
         let src = "use std::io::ErrorKind::*;\n\
                    enum Color { Red, Green, Blue }\n\
                    fn f(c: Color) -> u8 { match c { Red => 0, Green => 1, _ => 2 } }";
@@ -2074,25 +1841,28 @@ mod tests {
         // is a real catch-all and must still flag.
         let src = "use crate::MyEnum::*;\n\
                    fn f(x: MyEnum) -> i32 { match x { North => 1, South => 2, _ => 0 } }";
-        assert_eq!(run_on(src).len(), 1);
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/lib.rs", "pub enum MyEnum { North, South, East }"),
+            ("src/main.rs", src),
+        ]);
+        assert_eq!(diags.len(), 1);
     }
 
     #[test]
     fn flags_wildcard_on_qualified_arms_without_external_glob() {
-        // Issue #6242 negative space: qualified arms (`Foo::A | Foo::B`) carry an
-        // enum root and there is no external glob import, so the bare-variant glob
-        // exemption does not apply and the `_` arm still flags.
-        let src = "fn f(x: Foo) -> i32 { match x { Foo::A | Foo::B => 1, _ => 0 } }";
+        // Issue #6242: qualified arms of the same-file `Foo` flag.
+        let src = "enum Foo { A, B, C }\n\
+                   fn f(x: Foo) -> i32 { match x { Foo::A | Foo::B => 1, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
     #[test]
-    fn flags_wildcard_on_bare_pascal_arms_without_any_glob_import() {
-        // Issue #6242 negative space: bare PascalCase arms with NO glob import (the
-        // variants are defined in the same module) leave the scrutinee local, so
-        // the `_` arm is a real catch-all and must still flag.
+    fn allows_bare_pascal_arms_without_workspace_enum() {
+        // Issue #6242: bare PascalCase arms with no glob import are bindings.
+        // No workspace enum declares them, so nothing is flagged.
         let src = "fn f(x: Foo) -> i32 { match x { North => 1, South => 2, _ => 0 } }";
-        assert_eq!(run_on(src).len(), 1);
+        assert!(run_on(src).is_empty());
     }
 
     #[test]
@@ -2122,10 +1892,9 @@ mod tests {
 
     #[test]
     fn flags_qualified_arms_with_no_external_evidence() {
-        // Issue #6949 negative space: type-qualified arms with neither a glob nor a
-        // named import of the enum type carry no external evidence, so the scrutinee
-        // is a local enum and the `_` arm must still flag.
-        let src = "fn f(v: Value) -> i32 { match v { \
+        // Issue #6949: no import, so the same-file `Value` decides.
+        let src = "enum Value { Array(A), Object(O), Null }\n\
+                   fn f(v: Value) -> i32 { match v { \
                    Value::Array(a) => 1, Value::Object(o) => 2, _ => 0, } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -2135,6 +1904,7 @@ mod tests {
         // Issue #6949 negative space: a glob rooted at `crate` (or `self`/`super`) is
         // a local import, not external, so type-qualified arms under it still flag.
         let src = "use crate::*;\n\
+                   enum Value { Array(A), Object(O), Null }\n\
                    fn f(v: Value) -> i32 { match v { \
                    Value::Array(a) => 1, Value::Object(o) => 2, _ => 0, } }";
         assert_eq!(run_on(src).len(), 1);
@@ -2149,7 +1919,12 @@ mod tests {
         let src = "use serde_json::*;\n\
                    use crate::foo::Color;\n\
                    fn f(c: Color) -> i32 { match c { Color::Red => 1, _ => 0, } }";
-        assert_eq!(run_on(src).len(), 1);
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/foo.rs", "pub enum Color { Red, Green }"),
+            ("src/main.rs", src),
+        ]);
+        assert_eq!(diags.len(), 1);
     }
 
     #[test]
@@ -2170,7 +1945,8 @@ mod tests {
         // (`MyEnum::Foo { a }`, a `scoped_type_identifier`) is a genuine enum
         // struct-variant whose siblings are exhaustible, so the `_` arm must
         // still flag.
-        let src = "fn f(x: MyEnum) -> i32 { match x { \
+        let src = "enum MyEnum { Foo { a: i32 }, Bar { b: i32 }, Baz }\n\
+                   fn f(x: MyEnum) -> i32 { match x { \
                    MyEnum::Foo { a } => 1, MyEnum::Bar { b } => 2, _ => 3 } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -2180,7 +1956,8 @@ mod tests {
         // Issue #6987 control: tuple-variant patterns (`MyEnum::A(v)`,
         // `tuple_struct_pattern`) are unchanged by the struct_pattern fix and
         // must still flag.
-        let src = "fn f(x: MyEnum) -> i32 { match x { \
+        let src = "enum MyEnum { A(i32), B(i32), C }\n\
+                   fn f(x: MyEnum) -> i32 { match x { \
                    MyEnum::A(v) => 1, MyEnum::B(v) => 2, _ => 3 } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -2213,8 +1990,9 @@ mod tests {
         // on both arms. `WrapperA(Some(a))` paired with `_ => WrapperB(None)` wraps
         // in different newtypes — not one shared projection — so the `_` arm is a
         // real catch-all and must still flag.
-        let src = "fn f(&mut self) -> Iter { match self { \
-                   Self::Logs(a) => WrapperA(Some(a)), _ => WrapperB(None) } }";
+        let src = "enum Events { Logs(L), Other }\n\
+                   impl Events { fn f(&mut self) -> Iter { match self { \
+                   Self::Logs(a) => WrapperA(Some(a)), _ => WrapperB(None) } } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -2225,8 +2003,9 @@ mod tests {
         // `Wrapper(something_else)` catch-all silently maps every new variant to
         // that value, so it must still flag — the peel must re-check the inner
         // shape, not just the outer constructor identity.
-        let src = "fn f(&mut self) -> Iter { match self { \
-                   Self::Logs(a) => Wrapper(Some(a)), _ => Wrapper(something_else) } }";
+        let src = "enum Events { Logs(L), Other }\n\
+                   impl Events { fn f(&mut self) -> Iter { match self { \
+                   Self::Logs(a) => Wrapper(Some(a)), _ => Wrapper(something_else) } } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -2235,7 +2014,8 @@ mod tests {
         // Issue #7571 negative space: a wildcard whose body has no `Some`/`None`
         // pairing at all (`_ => make_default()`) is an ordinary catch-all over an
         // enum and must still flag.
-        let src = "fn f(x: Foo) -> Bar { match x { \
+        let src = "enum Foo { A, B }\n\
+                   fn f(x: Foo) -> Bar { match x { \
                    Foo::A => Bar::One, _ => make_default() } }";
         assert_eq!(run_on(src).len(), 1);
     }
@@ -2286,13 +2066,14 @@ mod tests {
     fn flags_wildcard_without_clippy_allow() {
         // The same wildcard enum match WITHOUT the mirror-lint suppression is a
         // genuine target and must still fire.
-        let src = r#"fn f(&self) -> bool {
+        let src = r#"enum Error { NotFound { what: String }, PointNotFound {}, Other }
+impl Error { fn f(&self) -> bool {
     match self {
         Self::NotFound { what } => what.contains("No point with id"),
         Self::PointNotFound { .. } => true,
         _ => false,
     }
-}"#;
+} }"#;
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -2300,14 +2081,15 @@ mod tests {
     fn flags_wildcard_under_unrelated_clippy_allow() {
         // An `#[allow]` of a DIFFERENT clippy lint must not suppress this rule:
         // the defer keys only on the exact mirror lint name.
-        let src = r#"fn f(&self) -> bool {
+        let src = r#"enum Error { NotFound { what: String }, PointNotFound {}, Other }
+impl Error { fn f(&self) -> bool {
     #[allow(clippy::match_same_arms)]
     match self {
         Self::NotFound { what } => what.contains("No point with id"),
         Self::PointNotFound { .. } => true,
         _ => false,
     }
-}"#;
+} }"#;
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -2341,7 +2123,8 @@ mod tests {
     fn flags_bare_pascal_variant_not_neutered_by_slice_fix() {
         // Issue #7830 guard: the slice-pattern bail-out must not neuter a genuine
         // enum-with-wildcard match. A bare PascalCase variant arm still flags.
-        let src = "fn f(e: E) -> i32 { match e { Variant1 => 1, _ => 0 } }";
+        let src = "enum E { Variant1, Variant2 }\n\
+                   fn f(e: E) -> i32 { match e { Variant1 => 1, _ => 0 } }";
         assert_eq!(run_on(src).len(), 1);
     }
 
@@ -2438,5 +2221,239 @@ edition = "2021"
             1,
             "a cfg-gated `Addr` in crate B must not exempt crate A's `Addr`"
         );
+    }
+
+    /// Issue #8617: a sibling-file enum is a workspace enum.
+    #[test]
+    fn flags_three_arm_match_on_enum_from_sibling_file() {
+        let matcher = "use crate::status::Status;\n\
+                       fn f(s: Status) -> i32 {\n\
+                           match s { Status::A => 1, Status::B => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/status.rs", "pub enum Status { A, B, C }"),
+            ("src/main.rs", matcher),
+        ]);
+        assert_eq!(diags.len(), 1, "the `_` over a sibling-file enum must flag");
+        assert_eq!((diags[0].line, diags[0].column), (3, 43));
+    }
+
+    /// Issue #8617: bare variants after a glob of a workspace enum.
+    #[test]
+    fn flags_bare_variants_after_glob_import_of_workspace_enum() {
+        let matcher = "use crate::status::Status::*;\n\
+                       fn f(s: Status) -> i32 {\n\
+                           match s { Active => 1, Blocked => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            (
+                "src/status.rs",
+                "pub enum Status { Active, Blocked, Closed }",
+            ),
+            ("src/main.rs", matcher),
+        ]);
+        assert_eq!(diags.len(), 1, "the `_` after a workspace glob must flag");
+    }
+
+    /// Issue #8617: a name no workspace crate declares is never flagged.
+    #[test]
+    fn allows_wildcard_on_undeclared_enum() {
+        let matcher = "fn f(m: Mode) -> i32 {\n\
+                           match m { Mode::A => 1, Mode::B => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/status.rs", "pub enum Status { A, B, C }"),
+            ("src/main.rs", matcher),
+        ]);
+        assert!(diags.is_empty(), "an undeclared enum must not flag");
+    }
+
+    /// Issue #8617: the named import of a dependency enum wins.
+    #[test]
+    fn allows_imported_dependency_error_despite_workspace_error() {
+        let matcher = "use reqwest::Error;\n\
+                       fn f(e: Error) -> i32 {\n\
+                           match e { Error::Timeout => 1, Error::Io => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/error.rs", "pub enum Error { Io, Parse }"),
+            ("src/main.rs", matcher),
+        ]);
+        assert!(
+            diags.is_empty(),
+            "the imported dependency `Error` must not flag"
+        );
+    }
+
+    /// Issue #8617: a dependency glob leaves the name unsettled.
+    #[test]
+    fn allows_name_unsettled_by_dependency_glob() {
+        let matcher = "use reqwest::*;\n\
+                       fn f(e: Error) -> i32 {\n\
+                           match e { Error::Io => 1, Error::Parse => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/error.rs", "pub enum Error { Io, Parse, Other }"),
+            ("src/main.rs", matcher),
+        ]);
+        assert!(diags.is_empty(), "an unsettled name must not flag");
+    }
+
+    /// Issue #8617: a guarded `_` never counts, the unguarded one flags.
+    #[test]
+    fn flags_unguarded_wildcard_after_guarded_wildcard() {
+        let src = "enum S { A, B, C }\n\
+                   fn f(c: bool, s: S) -> i32 {\n\
+                   match s { S::A => 1, _ if c => 2, _ => 3 }\n\
+                   }";
+        let diags = run_on(src);
+        assert_eq!(diags.len(), 1, "only the unguarded `_` must flag");
+        assert_eq!((diags[0].line, diags[0].column), (3, 35));
+    }
+
+    /// Issue #8617: a sibling-crate enum imported by crate name.
+    #[test]
+    fn flags_wildcard_on_enum_imported_from_sibling_crate() {
+        let matcher = "use core_types::Kind;\n\
+                       fn f(k: Kind) -> i32 {\n\
+                           match k { Kind::A => 1, Kind::B => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"core-types\"\nversion = \"0.1.0\"\n",
+            ),
+            ("core/src/lib.rs", "pub enum Kind { A, B, C }"),
+            ("app/Cargo.toml", POEM_CARGO_TOML),
+            ("app/src/main.rs", matcher),
+        ]);
+        assert_eq!(diags.len(), 1, "a sibling-crate enum must flag");
+    }
+
+    /// Issue #8617: a sibling-crate enum reached by a qualified path.
+    #[test]
+    fn flags_wildcard_on_sibling_crate_path_without_import() {
+        let matcher = "fn f(k: core_types::Kind) -> i32 {\n\
+                           match k { core_types::Kind::A => 1, core_types::Kind::B => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"core-types\"\nversion = \"0.1.0\"\n",
+            ),
+            ("core/src/lib.rs", "pub enum Kind { A, B, C }"),
+            ("app/Cargo.toml", POEM_CARGO_TOML),
+            ("app/src/main.rs", matcher),
+        ]);
+        assert_eq!(diags.len(), 1, "a sibling-crate path must flag");
+    }
+
+    /// Issue #8617: the compiler imposes `_` on a foreign `non_exhaustive` enum.
+    #[test]
+    fn allows_cross_crate_wildcard_on_non_exhaustive_workspace_enum() {
+        let matcher = "use core_types::Kind;\n\
+                       fn f(k: Kind) -> i32 {\n\
+                           match k { Kind::A => 1, Kind::B => 2, _ => 3 }\n\
+                       }";
+        let diags = run_cross_file(&[
+            (
+                "core/Cargo.toml",
+                "[package]\nname = \"core-types\"\nversion = \"0.1.0\"\n",
+            ),
+            (
+                "core/src/lib.rs",
+                "#[non_exhaustive]\npub enum Kind { A, B, C }",
+            ),
+            ("app/Cargo.toml", POEM_CARGO_TOML),
+            ("app/src/main.rs", matcher),
+        ]);
+        assert!(
+            diags.is_empty(),
+            "a cross-crate `non_exhaustive` enum must not flag"
+        );
+    }
+
+    /// Issue #8617: `non_exhaustive` does not exempt inside its own crate.
+    #[test]
+    fn flags_same_crate_wildcard_on_non_exhaustive_enum() {
+        let src = "#[non_exhaustive]\n\
+                   enum Kind { A, B }\n\
+                   fn f(k: Kind) -> i32 { match k { Kind::A => 1, _ => 2 } }";
+        assert_eq!(run_on(src).len(), 1);
+    }
+
+    const STATUS_RS: &str = "pub enum Status { Active, Blocked, Closed }";
+    const ERROR_RS: &str = "pub enum Error { Io, Parse }";
+
+    /// Issue #8617: a workspace glob never claims prelude or imported variants.
+    #[test]
+    fn allows_prelude_and_imported_variants_despite_workspace_glob() {
+        let matcher = "use crate::status::Status::*;\n\
+                       use std::cmp::Ordering::{Greater, Less};\n\
+                       fn f(o: Option<i32>) -> i32 { match o { Some(v) => v, _ => 0 } }\n\
+                       fn g(o: Ordering) -> i32 { match o { Less => 1, Greater => 2, _ => 0 } }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/status.rs", STATUS_RS),
+            ("src/main.rs", matcher),
+        ]);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// Issue #8617: a function-local glob stays in its function.
+    #[test]
+    fn function_local_glob_does_not_reach_sibling_function() {
+        let matcher = "fn g(s: Status) -> i32 {\n\
+                           use crate::status::Status::*;\n\
+                           match s { Active => 1, _ => 0 }\n\
+                       }\n\
+                       fn f(m: Mode) -> i32 { match m { Started => 1, Paused => 2, _ => 0 } }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/status.rs", STATUS_RS),
+            ("src/main.rs", matcher),
+        ]);
+        assert_eq!(diags.len(), 1, "only `g` matches a workspace enum");
+        assert_eq!(diags[0].line, 3);
+    }
+
+    /// Issue #8617: `Self` resolves through the `impl` type.
+    #[test]
+    fn allows_self_variants_of_dependency_enum() {
+        let src = "impl Show for dep::Kind {\n\
+                       fn show(&self) -> i32 { match self { Self::A => 1, _ => 0 } }\n\
+                   }";
+        assert!(run_on(src).is_empty());
+    }
+
+    /// Issue #8617: a `::`-rooted import is a dependency.
+    #[test]
+    fn allows_absolute_dependency_import_despite_workspace_error() {
+        let matcher = "use ::reqwest::Error;\n\
+                       fn f(e: Error) -> i32 { match e { Error::Io => 1, _ => 0 } }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/error.rs", ERROR_RS),
+            ("src/main.rs", matcher),
+        ]);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// Issue #8617: an aliased workspace enum still flags.
+    #[test]
+    fn flags_wildcard_on_aliased_workspace_enum() {
+        let matcher = "use crate::error::Error as AppError;\n\
+                       fn f(e: AppError) -> i32 { match e { AppError::Io => 1, _ => 0 } }";
+        let diags = run_cross_file(&[
+            ("Cargo.toml", POEM_CARGO_TOML),
+            ("src/error.rs", ERROR_RS),
+            ("src/main.rs", matcher),
+        ]);
+        assert_eq!(diags.len(), 1);
     }
 }

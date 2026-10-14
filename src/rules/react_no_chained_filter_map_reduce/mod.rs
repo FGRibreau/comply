@@ -1,4 +1,4 @@
-//! react-no-chained-filter-map-reduce — 3+ chained `.filter/.map/.reduce` calls.
+//! react-no-chained-filter-map-reduce — `min_chain`+ chained `.filter/.map/.reduce` calls.
 
 mod oxc_typescript;
 #[cfg(test)]
@@ -12,8 +12,8 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "react-no-chained-filter-map-reduce",
-    description: "Three or more consecutive `.filter`/`.map`/`.reduce` calls walk the array \
-                  multiple times and allocate intermediate arrays.",
+    description: "`min_chain` or more consecutive `.filter`/`.map`/`.reduce` calls \
+                  walk the array multiple times and allocate intermediate arrays.",
     remediation: "Collapse the chain into a single `for`/`reduce` pass or use a lazy iterator.",
     severity: Severity::Error,
     doc_url: None,

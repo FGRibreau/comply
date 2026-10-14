@@ -109,3 +109,133 @@ fn module_dependencies_skips_test_files() {
         .stdout(predicate::str::contains("a.ts"))
         .stdout(predicate::str::contains("a.test.ts").not());
 }
+
+/// Breaks the three opt-in rules and holds a raw NBSP.
+const FRENCH_PAGE: &str =
+    "export const Page = () => <p>Attention : l'agent d\u{e9}sol\u{e9} a\u{a0}b</p>;\n";
+
+#[test]
+fn french_copy_rules_are_off_by_default() {
+    let (dir, path) = write_ts_file("Page.tsx", FRENCH_PAGE);
+    std::fs::write(
+        dir.path().join("comply.toml"),
+        "[rules.banned-copy-words]\nbanned = [\"d\u{e9}sol\u{e9}\"]\n",
+    )
+    .expect("write comply.toml");
+    common::comply()
+        .current_dir(dir.path())
+        .arg(&path)
+        .assert()
+        .stdout(predicate::str::contains("no-raw-invisible-character"))
+        .stdout(predicate::str::contains("french-nbsp-before-punctuation").not())
+        .stdout(predicate::str::contains("banned-copy-words").not())
+        .stdout(predicate::str::contains("copy-apostrophe-style").not());
+}
+
+#[test]
+fn french_copy_rules_report_once_enabled() {
+    let (dir, path) = write_ts_file("Page.tsx", FRENCH_PAGE);
+    std::fs::write(
+        dir.path().join("comply.toml"),
+        "[rules.french-nbsp-before-punctuation]\ndisabled = false\n\
+         [rules.banned-copy-words]\ndisabled = false\nbanned = [\"d\u{e9}sol\u{e9}\"]\n\
+         [rules.copy-apostrophe-style]\ndisabled = false\n",
+    )
+    .expect("write comply.toml");
+    common::comply()
+        .current_dir(dir.path())
+        .arg(&path)
+        .assert()
+        .stdout(predicate::str::contains("french-nbsp-before-punctuation"))
+        .stdout(predicate::str::contains("banned-copy-words"))
+        .stdout(predicate::str::contains("copy-apostrophe-style"));
+}
+
+const RUNTIME_IDIOM_RULES: &[&str] = &[
+    "no-conditional-empty-object-spread",
+    "no-reduce-accumulator-copy",
+    "no-reflect-apply",
+    "require-explicit-time-zone",
+    "no-escape-in-jsx-text",
+    "no-native-title",
+];
+
+const RUNTIME_IDIOM_SOURCE: &str = r#"export const pair = items.filter(f).map(g);
+export const single = items.map(g);
+export const spread = { ...(cond ? { k } : {}) };
+export const copied = items.reduce((acc, x) => acc.concat(x), []);
+export const applied = Reflect.apply(f, t, args);
+export const day = date.toLocaleDateString("fr");
+export const text = <p>a\u00A0b</p>;
+export const titled = <span title="x">t</span>;
+"#;
+
+const RUNTIME_IDIOM_CONFIG: &str = r#"[rules.no-conditional-empty-object-spread]
+disabled = false
+[rules.no-reduce-accumulator-copy]
+disabled = false
+[rules.no-reflect-apply]
+disabled = false
+[rules.require-explicit-time-zone]
+disabled = false
+[rules.no-escape-in-jsx-text]
+disabled = false
+[rules.no-native-title]
+disabled = false
+hint = "<Tooltip>"
+[rules.react-no-chained-filter-map-reduce]
+min_chain = 2
+[rules.testing-no-mocking-internal-modules]
+include_packages = true
+"#;
+
+#[test]
+fn runtime_idiom_rules_are_opt_in_and_configurable() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let write = |name: &str, content: &str| std::fs::write(dir.path().join(name), content).unwrap();
+    write(
+        "package.json",
+        r#"{"name":"t","version":"0.0.0","dependencies":{"react":"^18.0.0"}}"#,
+    );
+    write("list.tsx", RUNTIME_IDIOM_SOURCE);
+    write(
+        "api.test.ts",
+        "vi.mock(\"axios\");\njest.mock(\"axios\");\nvi.doMock(\"axios\");\njest.unstable_mockModule(\"axios\", () => ({}));\n",
+    );
+    let lint = || {
+        let output = common::comply().arg(dir.path()).output().unwrap();
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let lines_of = |stdout: &str, id: &str| stdout.lines().filter(|line| line.contains(id)).count();
+
+    let stock = lint();
+    for id in RUNTIME_IDIOM_RULES.iter().chain(&[
+        "react-no-chained-filter-map-reduce",
+        "testing-no-mocking-internal-modules",
+    ]) {
+        assert!(!stock.contains(id), "{id} fired without opt-in:\n{stock}");
+    }
+
+    write("comply.toml", RUNTIME_IDIOM_CONFIG);
+    let configured = lint();
+    for id in RUNTIME_IDIOM_RULES {
+        assert!(
+            configured.contains(id),
+            "{id} did not fire once enabled:\n{configured}"
+        );
+    }
+    assert!(
+        configured.contains("<Tooltip>"),
+        "hint missing:\n{configured}"
+    );
+    assert_eq!(
+        lines_of(&configured, "react-no-chained-filter-map-reduce"),
+        1,
+        "{configured}"
+    );
+    assert_eq!(
+        lines_of(&configured, "testing-no-mocking-internal-modules"),
+        4,
+        "{configured}"
+    );
+}

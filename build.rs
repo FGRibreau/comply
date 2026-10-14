@@ -58,6 +58,9 @@ fn main() {
     out.push_str("    rules.extend(delegated::register_all());\n");
     out.push_str("    rules.extend(delegated::register_tsgolint());\n");
     out.push_str("    rules.extend(delegated::register_type_aware());\n");
+    out.push_str("    rules.push(crate::clone_detection::register());\n");
+    out.push_str("    rules.push(crate::comment_duplicate_detection::register());\n");
+    out.push_str("    rules.push(crate::function_duplicate_detection::register());\n");
     out.push_str("    rules\n");
     out.push_str("}\n");
 

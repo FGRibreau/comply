@@ -1648,13 +1648,11 @@ fn is_concise_arrow_body(nodes: &oxc_semantic::AstNodes, stmt_id: oxc_semantic::
 /// The `const` of an `as const` assertion is not such a name either: it prevents
 /// literal-type widening and declares no signature.
 fn is_named_type_reference(ty: &oxc_ast::ast::TSType) -> bool {
-    use oxc_ast::ast::{TSType, TSTypeName};
+    use oxc_ast::ast::TSType;
 
     match ty {
         TSType::TSIndexedAccessType(indexed) => is_named_type_reference(&indexed.object_type),
-        TSType::TSTypeReference(reference) => {
-            !matches!(&reference.type_name, TSTypeName::IdentifierReference(id) if id.name.as_str() == "const")
-        }
+        TSType::TSTypeReference(_) => !is_const_assertion(ty),
         _ => false,
     }
 }
@@ -8020,6 +8018,42 @@ pub fn peel_parens<'a>(
         current = &p.expression;
     }
     current
+}
+
+/// True when `ty` is the `const` of `expr as const`.
+#[must_use]
+pub fn is_const_assertion(ty: &oxc_ast::ast::TSType) -> bool {
+    use oxc_ast::ast::{TSType, TSTypeName};
+    matches!(ty, TSType::TSTypeReference(reference)
+        if matches!(&reference.type_name, TSTypeName::IdentifierReference(id) if id.name == "const"))
+}
+
+/// True for a literal `const` under a wider annotation.
+#[must_use]
+pub fn widened_literal_const(declarator: &oxc_ast::ast::VariableDeclarator) -> bool {
+    use oxc_ast::ast::{Expression, TSType, VariableDeclarationKind};
+    if declarator.kind != VariableDeclarationKind::Const {
+        return false;
+    }
+    let Some(annotation) = &declarator.type_annotation else {
+        return false;
+    };
+    if matches!(annotation.type_annotation, TSType::TSLiteralType(_)) {
+        return false;
+    }
+    match &declarator.init {
+        Some(Expression::TemplateLiteral(template)) => template.expressions.is_empty(),
+        // An empty accumulator takes its only type from the annotation.
+        Some(Expression::ObjectExpression(object)) => !object.properties.is_empty(),
+        Some(Expression::ArrayExpression(array)) => !array.elements.is_empty(),
+        Some(init) => matches!(
+            init,
+            Expression::StringLiteral(_)
+                | Expression::NumericLiteral(_)
+                | Expression::BooleanLiteral(_)
+        ),
+        None => false,
+    }
 }
 
 /// Peel transparent, value-preserving wrappers off `expr`, returning the first

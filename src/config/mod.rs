@@ -119,6 +119,12 @@ impl Config {
         &self.raw.entrypoints
     }
 
+    /// The `[clippy]` table, rendered as-is into the generated clippy.toml.
+    #[must_use]
+    pub fn clippy_passthrough(&self) -> &toml::Table {
+        &self.raw.clippy
+    }
+
     /// True if `rule_id` is enabled for `file_path`. Combines:
     ///   - global `[rules.<id>] disabled = true` (kills the rule everywhere)
     ///   - per-glob `[overrides."<g>"] disable = [<id>]` (kills it for matches)
@@ -484,6 +490,7 @@ fn merge(mut base: ComplyToml, user: ComplyToml) -> ComplyToml {
     for (glob, override_cfg) in user.overrides {
         base.overrides.insert(glob, override_cfg);
     }
+    base.clippy.extend(user.clippy);
     base
 }
 
@@ -553,6 +560,14 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    #[should_panic(expected = "[rules.\"no-clones\"] min_distinct_trigrams")]
+    fn no_clones_panics_naming_missing_key() {
+        let raw: ComplyToml = toml::from_str("[rules.no-clones]\nmin_tokens = 100\n").unwrap();
+        let cfg = Config::from_raw(raw).unwrap();
+        let _ = crate::clone_detection::lint_files(&[], &cfg);
+    }
+
+    #[test]
     fn default_config_returns_known_thresholds() {
         let cfg = Config::default();
         assert_eq!(cfg.threshold("max-function-lines", "max", Language::TypeScript), 30);
@@ -567,6 +582,29 @@ mod tests {
             cfg.threshold("no-duplicate-type-definition", "min_properties", Language::TypeScript),
             4
         );
+    }
+
+    #[test]
+    fn type_safety_rules_are_opt_in() {
+        let ids = [
+            "no-chained-type-assertions",
+            "no-widen-then-assert",
+            "require-safety-comment-for-type-assertion",
+            "no-unknown-parameters",
+            "no-unsafe-dictionary-type",
+            "no-runtime-typeof",
+            "no-known-value-widening",
+        ];
+        let defaults = Config::default();
+        assert!(ids.iter().all(|id| defaults.is_rule_globally_disabled(id)));
+        let project_dir = TempDir::new().unwrap();
+        let enabled: String = ids
+            .iter()
+            .map(|id| format!("[rules.{id}]\ndisabled = false\n"))
+            .collect();
+        fs::write(project_dir.path().join("comply.toml"), enabled).unwrap();
+        let cfg = Config::load_from(project_dir.path()).unwrap();
+        assert!(ids.iter().all(|id| !cfg.is_rule_globally_disabled(id)));
     }
 
     #[test]

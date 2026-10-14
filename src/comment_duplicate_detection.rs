@@ -539,18 +539,40 @@ fn attribute_item_is_cfg(attr_item: tree_sitter::Node, source: &[u8]) -> bool {
     })
 }
 
+/// Catalog entry only; `main.rs` runs the detector itself.
+pub fn register() -> crate::rules::RuleDef {
+    crate::rules::RuleDef {
+        meta: crate::rules::meta::RuleMeta {
+            id: RULE_ID,
+            description: "A comment must not copy the opening of a comment in another place.",
+            remediation: "Lift the shared rationale into an ADR or canonical doc the comments cite.",
+            severity: Severity::Error,
+            doc_url: None,
+            categories: &["code-quality"],
+            skip_in_test_dir: false,
+            skip_in_relaxed_dir: false,
+        },
+        backends: vec![],
+    }
+}
+
+/// A copy shared with `reference` reports on the `files` side.
 #[must_use]
-pub fn lint_files(files: &[&SourceFile], config: &Config) -> Vec<Diagnostic> {
-    let files: Vec<&SourceFile> = files
-        .iter()
-        .copied()
-        .filter(|f| is_target_language(f.language))
-        .filter(|f| {
-            !crate::rules::file_ctx::scan_path(&f.path).is_relaxed_dir
-                && !crate::rules::file_ctx::is_generated_path(&f.path)
-                && !is_locale_path(&f.path)
-        })
-        .collect();
+pub fn lint_files(
+    files: &[&SourceFile],
+    reference: &[&SourceFile],
+    config: &Config,
+) -> Vec<Diagnostic> {
+    let is_checked = |f: &&SourceFile| {
+        is_target_language(f.language)
+            && !crate::rules::file_ctx::scan_path(&f.path).is_relaxed_dir
+            && !crate::rules::file_ctx::is_generated_path(&f.path)
+            && !is_locale_path(&f.path)
+    };
+    let mut checked: Vec<&SourceFile> = reference.iter().copied().filter(is_checked).collect();
+    let reference_count = checked.len();
+    checked.extend(files.iter().copied().filter(is_checked));
+    let files = checked;
 
     if files.len() < 2 {
         return vec![];
@@ -588,12 +610,13 @@ pub fn lint_files(files: &[&SourceFile], config: &Config) -> Vec<Diagnostic> {
         // not exempt against it — so a bucket of N yields at most N-1
         // diagnostics, and a member's verdict depends only on the bucket's
         // contents, never on which member wins a similarity contest among them.
+        // Reference files sort first, so the scanned copy reports.
         let mut ordered = members.clone();
         ordered.sort_by(|&a, &b| {
             let (ea, eb) = (&entries[a], &entries[b]);
-            files[ea.file_idx]
-                .path
-                .cmp(&files[eb.file_idx].path)
+            (ea.file_idx >= reference_count)
+                .cmp(&(eb.file_idx >= reference_count))
+                .then(files[ea.file_idx].path.cmp(&files[eb.file_idx].path))
                 .then(ea.line.cmp(&eb.line))
         });
         for (pos, &m) in ordered.iter().enumerate().skip(1) {
@@ -1616,7 +1639,7 @@ mod tests {
     }
 
     fn run(files: &[&SourceFile]) -> Vec<Diagnostic> {
-        lint_files(files, &Config::default())
+        lint_files(files, &[], &Config::default())
     }
 
     const C1: &str = "\
@@ -4195,5 +4218,20 @@ pub fn aes128_decrypt(x: u8) -> u8 { x }
             language: Language::TypeScript,
         };
         assert!(run(&[&f]).is_empty());
+    }
+
+    #[test]
+    fn reference_file_is_the_canonical_comment() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let changed = write(&dir, "a.ts", C1);
+        let original = write(&dir, "z.ts", &format!("const pad = 0;\n{C1}"));
+        let diags = lint_files(&[&changed], &[&original], &Config::default());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].path.as_ref(), changed.path.as_path());
+        assert!(
+            diags[0]
+                .message
+                .contains(&format!("`{}` at line 2", original.path.display()))
+        );
     }
 }

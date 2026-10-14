@@ -193,6 +193,10 @@ max = 10
 [rules.comment-max-block-words]
 max = 30
 
+# Set `allow_url = false` to accept only `TODO(#1234)`, not `TODO(https://…)`.
+[rules.todo-needs-issue-link]
+allow_url = true
+
 # When non-empty, jsdoc-missing-example only fires on files whose path matches
 # at least one of these glob patterns. Leave empty (the default) to require
 # @example on every exported function with JSDoc regardless of file location.
@@ -289,13 +293,17 @@ min_words = 15
 shared_prefix_words = 8
 prefix_pct = 0.25
 
-# Cross-file exact-duplicate named functions. Flags a named function whose
-# identifier AND body (tokens, comments/whitespace ignored) are identical across
-# two or more files — the copy-paste that clone detection misses when the body
-# is shorter than its 100-token window. `min_body_tokens` keeps trivial bodies
-# (`noop`, one-line getters) out of scope.
+# Cross-file copies of named functions, bound names renamed or not.
+# `min_body_tokens` keeps trivial bodies out of scope.
 [rules.no-duplicate-function]
 min_body_tokens = 10
+
+# Cross-file token clones, all languages. `min_tokens` is the window width.
+# `min_distinct_trigrams` drops low-entropy runs like registration tables.
+# Lower both to catch short repeated constants or JSX fragments.
+[rules.no-clones]
+min_tokens = 100
+min_distinct_trigrams = 145
 
 # Cross-program structurally-identical named object types (a copy-paste smell).
 # `min_properties` is the minimum number of resolved properties a shape must have
@@ -314,11 +322,22 @@ characters = ["—", "–"]
 scope = "jsx-copy"
 entries = []
 
+# Shortest `.filter`/`.map`/`.reduce` chain flagged. 2 flags any adjacent pair.
+[rules.react-no-chained-filter-map-reduce]
+min_chain = 3
+
+# Also flag mocks of packages (`vi.mock("axios")`), not only relative paths.
+[rules.testing-no-mocking-internal-modules]
+include_packages = false
+
 # ---------------------------------------------------------------
 # Disabled by default — opt-in only.
 # ---------------------------------------------------------------
 
 [rules.node-no-callback-literal]
+disabled = true
+
+[rules.require-readable-spacing]
 disabled = true
 
 [rules.ts-explicit-function-return-type]
@@ -338,6 +357,65 @@ disabled = true
 
 [rules.no-throw]
 disabled = true
+
+# French copy typography, tied to the project's language.
+[rules.french-nbsp-before-punctuation]
+disabled = true
+
+# `banned`: words flagged in UI copy. `allowed`: phrases exempting them.
+[rules.banned-copy-words]
+disabled = true
+banned = []
+allowed = []
+
+# `style`: "typographic" (’) or "straight" (').
+[rules.copy-apostrophe-style]
+disabled = true
+style = "typographic"
+
+[rules.no-chained-type-assertions]
+disabled = true
+
+[rules.no-widen-then-assert]
+disabled = true
+
+[rules.require-safety-comment-for-type-assertion]
+disabled = true
+marker = "SAFETY:"
+
+[rules.no-unknown-parameters]
+disabled = true
+allowed_names = ["cause"]
+
+[rules.no-unsafe-dictionary-type]
+disabled = true
+
+[rules.no-runtime-typeof]
+disabled = true
+allow_in_type_guards = false
+
+[rules.no-known-value-widening]
+disabled = true
+
+[rules.no-conditional-empty-object-spread]
+disabled = true
+
+[rules.no-reduce-accumulator-copy]
+disabled = true
+
+[rules.no-reflect-apply]
+disabled = true
+
+[rules.require-explicit-time-zone]
+disabled = true
+
+[rules.no-escape-in-jsx-text]
+disabled = true
+
+# `hint` names the replacement in the message, e.g. "<Tooltip>".
+[rules.no-native-title]
+disabled = true
+hint = ""
 
 # ---------------------------------------------------------------
 # Rust correctness / observability — no thresholds, listed here
@@ -678,6 +756,14 @@ route_boundary_patterns = [
   "src/routes/**/layout*",
   "src/routes/**/plugin*",
 ]
+
+# ---------------------------------------------------------------
+# no-undeclared-env-var
+# Env var names never flagged, e.g. tooling names. Empty by default.
+# Example: allowed = ["NODE_ENV"]
+# ---------------------------------------------------------------
+[rules.no-undeclared-env-var]
+allowed = []
 
 # ---------------------------------------------------------------
 # no-unknown-pseudo-class

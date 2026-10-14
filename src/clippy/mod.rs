@@ -27,7 +27,7 @@
 
 mod all_args;
 mod all_lints;
-mod config_writer;
+pub(crate) mod config_writer;
 mod remap;
 mod schema;
 
@@ -42,7 +42,7 @@ use crate::config::Config;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::files::SourceFile;
 use crate::rules::meta::RuleMeta;
-use schema::CargoMessage;
+use schema::{CargoMessage, RustcDiagnostic};
 
 /// Cached availability probe for `cargo clippy`. Rust toolchains usually
 /// ship clippy via rustup, but in container builds it can be missing.
@@ -63,8 +63,8 @@ pub fn is_available() -> bool {
 ///   - add `-W clippy::xxx` for any lint flagged `enabled = true`
 ///     in `[rules."clippy::xxx"]` (most clippy lints default to
 ///     `allow`, so this is how the user opts in to extra ones)
-///   - materialize a temporary `clippy.toml` from per-lint thresholds
-///     and point cargo at it via `CLIPPY_CONF_DIR`, so something like
+///   - materialize a temporary `clippy.toml` from per-lint thresholds and
+///     `[clippy]`, and point cargo at it via `CLIPPY_CONF_DIR`, so something like
 ///     `[rules."clippy::too_many_lines"] threshold = 50` actually
 ///     reaches clippy
 #[must_use = "diagnostics from clippy must be reported"]
@@ -78,11 +78,15 @@ pub fn lint_files(files: &[&SourceFile], config: &Config) -> Result<Vec<Diagnost
     extend_with_user_enabled(&mut lint_args, config);
     extend_with_user_disabled(&mut lint_args, config);
 
-    // Materialize the optional temp clippy.toml. The TempDir handle
+    // Materialize the temp clippy.toml. The TempDir handle
     // must outlive the cargo subprocess, so keep it bound here.
-    let clippy_conf = config_writer::materialize(config)?;
+    let (_clippy_conf_guard, clippy_conf_dir) = config_writer::materialize(config)?;
 
     let workspaces = group_by_workspace(files);
+    // Every root is checked before any clippy run starts.
+    for root in workspaces.keys().flatten() {
+        config_writer::reject_project_clippy_toml(root)?;
+    }
     let mut diagnostics = Vec::new();
     let mut skipped = Vec::new();
 
@@ -93,11 +97,7 @@ pub fn lint_files(files: &[&SourceFile], config: &Config) -> Result<Vec<Diagnost
                     .iter()
                     .map(|f| canonicalize_or_self(&f.path))
                     .collect();
-                let output = invoke_clippy(
-                    &root,
-                    &lint_args,
-                    clippy_conf.as_ref().map(|(_, p)| p.as_path()),
-                )?;
+                let output = invoke_clippy(&root, &lint_args, &clippy_conf_dir)?;
                 diagnostics.extend(parse_clippy_jsonl(
                     &output.stdout,
                     &root,
@@ -206,21 +206,19 @@ fn group_by_workspace<'a>(
 /// virtual manifest covers all members, and a root that is itself a
 /// package still reaches the other members instead of only the root crate.
 ///
-/// `clippy_conf_dir` is the directory containing comply's generated
-/// `clippy.toml` (when the user set per-lint thresholds in
-/// `comply.toml`). When `Some`, it gets passed via the
-/// `CLIPPY_CONF_DIR` env var so cargo finds it before falling back to
-/// the project's own `clippy.toml`.
+/// `clippy_conf_dir` holds comply's generated `clippy.toml` (`CLIPPY_CONF_DIR`).
+/// `lint_files` refused any project `clippy.toml` beforehand.
 fn invoke_clippy(
     workspace: &Path,
     lint_args: &[String],
-    clippy_conf_dir: Option<&Path>,
+    clippy_conf_dir: &Path,
 ) -> Result<std::process::Output> {
     let manifest = workspace.join("Cargo.toml");
     let mut cmd = Command::new("cargo");
     cmd.args([
         "clippy",
         "--workspace",
+        "--all-targets",
         "--message-format=json",
         "--quiet",
         "--manifest-path",
@@ -230,10 +228,8 @@ fn invoke_clippy(
     for arg in lint_args {
         cmd.arg(arg);
     }
-    if let Some(dir) = clippy_conf_dir {
-        let (key, val) = config_writer::env_var_for_dir(dir);
-        cmd.env(key, val);
-    }
+    let (key, val) = config_writer::env_var_for_dir(clippy_conf_dir);
+    cmd.env(key, val);
 
     let output = cmd
         .output()
@@ -284,6 +280,8 @@ fn parse_clippy_jsonl(
 ) -> Vec<Diagnostic> {
     let reader = BufReader::new(stdout);
     let mut diagnostics = Vec::new();
+    // `--all-targets` builds a crate as lib and as test: one finding each.
+    let mut seen = FxHashSet::default();
 
     for line in reader.lines().map_while(Result::ok) {
         let Ok(envelope) = serde_json::from_str::<CargoMessage>(&line) else {
@@ -325,6 +323,15 @@ fn parse_clippy_jsonl(
         if !file_filter.contains(&span_path) {
             continue;
         }
+        let location = (
+            span_path.clone(),
+            span.line_start,
+            span.column_start,
+            code.code.clone(),
+        );
+        if !seen.insert(location) {
+            continue;
+        }
 
         let severity = Severity::Error;
 
@@ -338,13 +345,42 @@ fn parse_clippy_jsonl(
             line: span.line_start.max(1),
             column: span.column_start.max(1),
             rule_id,
-            message: diag.message,
+            message: with_disallowed_reason(diag.message, &diag.children, &code.code),
             severity,
             span: None,
         });
     }
 
     diagnostics
+}
+
+/// Append the `reason` of a `disallowed-*` entry to clippy's message.
+/// Provenance notes (`#[warn(clippy::…)]` on by default) name the lint.
+fn with_disallowed_reason(message: String, children: &[RustcDiagnostic], code: &str) -> String {
+    if !code.starts_with("clippy::disallowed_") {
+        return message;
+    }
+    let reasons: Vec<&str> = children
+        .iter()
+        .filter(|c| c.level == "note" && !is_lint_level_note(&c.message))
+        .map(|c| c.message.as_str())
+        .collect();
+    if reasons.is_empty() {
+        return message;
+    }
+    format!("{message}: {}", reasons.join("; "))
+}
+
+/// Whether a note is rustc's lint-level provenance.
+fn is_lint_level_note(message: &str) -> bool {
+    [
+        "`#[",
+        "`-",
+        "requested on the command line",
+        "the lint level is defined",
+    ]
+    .iter()
+    .any(|prefix| message.starts_with(prefix))
 }
 
 /// Canonicalize the path if possible, otherwise return it as-is.
@@ -447,5 +483,32 @@ mod tests {
 
         let diagnostics = parse_clippy_jsonl(json, Path::new("/abs"), &filter, &remap);
         assert!(diagnostics.is_empty());
+    }
+
+    #[test]
+    fn parse_clippy_jsonl_appends_disallowed_reason() {
+        let remap: FxHashMap<String, &'static RuleMeta> = FxHashMap::default();
+        let json = br#"{"reason":"compiler-message","message":{"message":"use of a disallowed method `std::env::var`","code":{"code":"clippy::disallowed_methods"},"level":"warning","spans":[{"file_name":"/abs/src/main.rs","line_start":3,"column_start":5,"is_primary":true}],"children":[{"message":"read Config","level":"note","spans":[],"children":[]},{"message":"for further information visit https://rust-lang.github.io/rust-clippy","level":"help","spans":[],"children":[]},{"message":"`#[warn(clippy::disallowed_methods)]` on by default","level":"note","spans":[],"children":[]}]}}"#;
+        let mut filter = FxHashSet::default();
+        filter.insert(PathBuf::from("/abs/src/main.rs"));
+
+        let diagnostics = parse_clippy_jsonl(json, Path::new("/abs"), &filter, &remap);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].message,
+            "use of a disallowed method `std::env::var`: read Config"
+        );
+    }
+
+    #[test]
+    fn parse_clippy_jsonl_reports_a_span_once_across_targets() {
+        let remap: FxHashMap<String, &'static RuleMeta> = FxHashMap::default();
+        let line = r#"{"reason":"compiler-message","message":{"message":"length comparison to zero","code":{"code":"clippy::len_zero"},"level":"warning","spans":[{"file_name":"/abs/src/lib.rs","line_start":2,"column_start":8,"is_primary":true}]}}"#;
+        let json = format!("{line}\n{line}\n");
+        let mut filter = FxHashSet::default();
+        filter.insert(PathBuf::from("/abs/src/lib.rs"));
+
+        let diagnostics = parse_clippy_jsonl(json.as_bytes(), Path::new("/abs"), &filter, &remap);
+        assert_eq!(diagnostics.len(), 1);
     }
 }

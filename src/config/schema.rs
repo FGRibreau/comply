@@ -38,6 +38,9 @@ pub struct ComplyToml {
     pub rules: FxHashMap<String, RuleConfig>,
     #[serde(default)]
     pub overrides: FxHashMap<String, OverrideConfig>,
+    /// Any `clippy.toml` key, copied verbatim into the generated file.
+    #[serde(default)]
+    pub clippy: toml::Table,
 }
 
 /// Per-rule overrides. Every field is optional — only the ones the

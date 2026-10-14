@@ -12,8 +12,10 @@
 //!   resolves the Rust module graph
 //! - [`run_rule_in_crate`] — one file beside a real `Cargo.toml`, for a rule
 //!   that reads the manifest
+//! - [`run_oxc_rule_with_toml`] — an oxc rule under a project `comply.toml`
 //! - [`run_rule_gated`] — applies the production `applies_to_file` gate
 //! - [`run_rule_by_id`] — look up rule by string ID (for integration tests)
+//! - [`run_oxc_check_with_config`] — an OXC check under a project `comply.toml`
 
 #![cfg(test)]
 
@@ -71,23 +73,67 @@ pub(crate) fn run_oxc_check(
     project: &ProjectCtx,
     file: &FileCtx,
 ) -> Vec<Diagnostic> {
+    run_oxc_check_in(check, &CheckCtx::for_test_full(path, src, project, file))
+}
+
+/// Run an `OxcCheck` under a project whose `comply.toml` holds `toml`.
+#[must_use]
+pub fn run_oxc_rule_with_toml(
+    check: &dyn OxcCheck,
+    src: &str,
+    path: impl AsRef<Path>,
+    toml: &str,
+) -> Vec<Diagnostic> {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("comply.toml"), toml).unwrap();
+    let config = crate::config::Config::load_from(dir.path()).unwrap();
+    let ctx = CheckCtx {
+        config: &config,
+        ..CheckCtx::for_test(path.as_ref(), src)
+    };
+    run_oxc_check_in(check, &ctx)
+}
+
+fn run_oxc_check_in(check: &dyn OxcCheck, ctx: &CheckCtx) -> Vec<Diagnostic> {
     crate::oxc_helpers::reset_file_caches();
-    let source_type = crate::oxc_helpers::source_type_for_path(path);
+    let source_type = crate::oxc_helpers::source_type_for_path(ctx.path);
     let allocator = Allocator::default();
-    let parse_ret = OxcParser::new(&allocator, src, source_type).parse();
+    let parse_ret = OxcParser::new(&allocator, ctx.source, source_type).parse();
     let semantic = SemanticBuilder::new().build(&parse_ret.program).semantic;
-    let ctx = CheckCtx::for_test_full(path, src, project, file);
     let kinds = check.interested_kinds();
     if kinds.is_empty() {
-        return check.run_on_semantic(&semantic, &ctx);
+        return check.run_on_semantic(&semantic, ctx);
     }
     let mut diagnostics = Vec::new();
     for node in semantic.nodes().iter() {
         if kinds.contains(&node.kind().ty()) {
-            check.run(node, &ctx, &semantic, &mut diagnostics);
+            check.run(node, ctx, &semantic, &mut diagnostics);
         }
     }
     diagnostics
+}
+
+/// Run an OxcCheck on TypeScript `src` under a project `comply.toml`.
+#[must_use]
+pub fn run_oxc_check_with_config(
+    check: &dyn OxcCheck,
+    src: &str,
+    comply_toml: &str,
+) -> Vec<Diagnostic> {
+    let project_dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(project_dir.path().join("comply.toml"), comply_toml).expect("write cfg");
+    let config = crate::config::Config::load_from(project_dir.path()).expect("load cfg");
+    let path = Path::new("t.ts");
+    let ctx = CheckCtx {
+        path,
+        path_arc: std::sync::Arc::from(path),
+        source: src,
+        config: &config,
+        project: crate::project::default_static_project_ctx(),
+        file: crate::rules::file_ctx::default_static_file_ctx(),
+        lang: Language::TypeScript,
+    };
+    run_oxc_check_in(check, &ctx)
 }
 
 /// Run a rule against `src`, using the language inferred from `path`.

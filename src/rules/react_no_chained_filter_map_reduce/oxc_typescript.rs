@@ -21,8 +21,8 @@ fn method_name_of_call<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option
     }
 }
 
-fn chain_length<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> u32 {
-    let mut count = 0u32;
+fn chain_length<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> usize {
+    let mut count = 0usize;
     let mut current = call;
     loop {
         if method_name_of_call(current).is_none() {
@@ -101,7 +101,7 @@ impl OxcCheck for Check {
             return;
         }
         let len = chain_length(call);
-        if len < 3 {
+        if len < ctx.config.threshold(super::META.id, "min_chain", ctx.lang) {
             return;
         }
 

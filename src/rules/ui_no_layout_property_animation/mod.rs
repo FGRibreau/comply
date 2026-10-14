@@ -1,7 +1,8 @@
-//! ui-no-layout-property-animation — flag inline `transition` /
-//! `transitionProperty` styles that animate layout-triggering properties
-//! (width, height, top, left, right, bottom, margin, padding, border).
-//! Layout-triggering animations cause layout recalculation every frame.
+//! ui-no-layout-property-animation — flag animated layout properties.
+//!
+//! Checks inline `transition` and `transitionProperty` styles.
+//! Checks motion `animate`, `initial`, `exit` and `while*` props.
+//! Animating layout recalculates it every frame.
 
 mod oxc_typescript;
 
@@ -13,8 +14,9 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "ui-no-layout-property-animation",
-    description: "Inline `transition` references a layout-triggering property — animating layout \
-                  causes per-frame layout recalculation.",
+    description: "Inline `transition` or a motion `animate`/`initial`/`exit`/`while*` prop \
+                  references a layout-triggering property — animating layout causes per-frame \
+                  layout recalculation.",
     remediation: "Animate `transform`, `opacity`, `color`, `background`, or `filter` instead — \
                   they don't trigger layout.",
     severity: Severity::Error,
