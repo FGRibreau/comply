@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2090 rules across 153 categories.
+2089 rules across 153 categories.
 
 ## Categories
 
@@ -103,7 +103,7 @@
 - [react-native](#react-native) (17 rules)
 - [react-native > security](#react-native-security) (1 rules)
 - [regex](#regex) (33 rules)
-- [rust](#rust) (81 rules)
+- [rust](#rust) (80 rules)
 - [rust > api](#rust-api) (3 rules)
 - [rust > architecture](#rust-architecture) (1 rules)
 - [rust > async](#rust-async) (1 rules)
@@ -1932,7 +1932,6 @@
 | `rust-prefer-channel-over-arc-mutex-vec` | `Arc<Mutex<Vec<` for collecting task results adds contention. Use `mpsc::channel` instead. | Use `let (tx, rx) = mpsc::channel(); ... tx.send(result); let results: Vec<_> = rx.iter().collect();`. |
 | `rust-prefer-once-lock` | `lazy_static!` and `once_cell` are superseded by `std::sync::OnceLock`/`LazyLock` (Rust 1.70+). | Replace `lazy_static! { static ref X: T = ... }` with `static X: LazyLock<T> = LazyLock::new(\|\| ...);`. |
 | `rust-prefer-strum` | Enum has manual `Display` + `FromStr` impls — use `#[derive(strum::Display, strum::EnumString)]` instead. | Add `#[derive(strum::Display, strum::EnumString)]` and remove the manual impls. Add `#[strum(serialize = "...")]` on variants if the string form differs from the variant name. |
-| `rust-prefer-unwrap-or-explicit` | Ban `.unwrap_or_default()`; require an explicit fallback value. | Replace `.unwrap_or_default()` with `.unwrap_or(0)` / `.unwrap_or(String::new())` / `.unwrap_or_else(\|\| vec![])` — whatever the default is for this type, make it visible at the call site. |
 | `rust-ptr-arg` | Prefer borrowed slices over borrowed owned types. | Replace `&String` with `&str`, `&Vec<T>` with `&[T]`, `&PathBuf` with `&Path`. The slice form accepts more caller types with no extra cost. Enable `clippy::ptr_arg`. |
 | `rust-pub-enum-without-non-exhaustive` | `pub enum` without `#[non_exhaustive]` makes new variants a breaking change. | Add `#[non_exhaustive]` above the enum. Downstream crates will need a wildcard `_ => …` arm to match it, which means future-you can add variants without releasing a major version. |
 | `rust-rc-mutex` | `Rc<Mutex<T>>` pays the Mutex cost for zero benefit — Rc is !Send. | Replace `Rc<Mutex<T>>` with `Rc<RefCell<T>>` (single-threaded interior mutability, no atomic ops). If you actually need cross-thread sharing, use `Arc<Mutex<T>>` instead. |
