@@ -2,8 +2,8 @@
 
 use oxc_ast::AstKind;
 use oxc_ast::ast::{
-    CallExpression, Expression, JSXAttributeName, JSXAttributeValue, ObjectPropertyKind,
-    TemplateLiteral,
+    CallExpression, Expression, JSXAttributeItem, JSXAttributeName, JSXAttributeValue,
+    JSXOpeningElement, ObjectPropertyKind, TemplateLiteral,
 };
 use oxc_semantic::{NodeId, Semantic};
 use oxc_span::Span;
@@ -24,7 +24,6 @@ pub const CLASS_HELPERS: &[&str] = &[
 pub struct ClassString<'a> {
     pub span: Span,
     pub classes: Vec<Class<'a>>,
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by #8622"))]
     pub in_conditional: bool,
     pub in_iteration_callback: bool,
 }
@@ -54,6 +53,29 @@ pub fn class_strings<'a>(semantic: &'a Semantic<'a>) -> Vec<ClassString<'a>> {
                 string.in_iteration_callback = true;
             }
         }
+    }
+    strings
+}
+
+/// The class strings of one element's own attributes, constants resolved.
+#[must_use]
+pub fn element_class_strings<'a>(
+    opening: &'a JSXOpeningElement<'a>,
+    semantic: &'a Semantic<'a>,
+) -> Vec<ClassString<'a>> {
+    let mut strings = Vec::new();
+    let mut nested = Vec::new();
+    for attr in opening
+        .attributes
+        .iter()
+        .filter_map(JSXAttributeItem::as_attribute)
+    {
+        collect_entry_point(
+            AstKind::JSXAttribute(attr),
+            semantic,
+            &mut strings,
+            &mut nested,
+        );
     }
     strings
 }
