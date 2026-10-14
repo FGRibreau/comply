@@ -3353,14 +3353,8 @@ pub struct ProjectCtx {
     // — is not flagged.
     rust_non_debug_traits: OnceLock<FxHashMap<PathBuf, FxHashSet<String>>>,
 
-    // Cross-file map: crate root (Cargo manifest dir) → set of enum names
-    // declared in that crate with at least one `#[cfg(...)]`-gated variant, so
-    // their variant set is target-dependent. Built once on first access from the
-    // indexed `.rs` files (no extra fs walk).
-    // `rust-explicit-enum-match-arms` consults it so a `match` on an enum
-    // declared in a sibling file (poem's `Addr` in `addr.rs`, matched in
-    // `web/real_ip.rs`) — which no arm list can cover portably — is not flagged.
-    rust_cfg_gated_enums: OnceLock<FxHashMap<PathBuf, FxHashSet<String>>>,
+    // Crate root (Cargo manifest dir) → enums declared in that crate.
+    rust_workspace_enums: OnceLock<FxHashMap<PathBuf, FxHashMap<String, EnumDecl>>>,
 
     // "Is this `.rs` file compiled only under `cfg(test)`?" — keyed by the file
     // path asked about. Answering walks the `mod` declaration chain up to the
@@ -3728,40 +3722,36 @@ impl ProjectCtx {
         map
     }
 
-    /// True when an enum named `enum_name`, declared somewhere in the same crate
-    /// as `path` (the crate identified by the nearest `Cargo.toml`), has at least
-    /// one `#[cfg(...)]`-gated variant — its variant set is target-dependent, so
-    /// no arm list covers it on every target. Lets
-    /// `rust-explicit-enum-match-arms` accept the wildcard `_` arm on a `match`
-    /// over an enum declared in a sibling file. Returns `false` when `path` has
-    /// no Cargo manifest (the crate boundary is unknown — same-file detection
-    /// still applies) or the enum is declared outside the crate.
-    ///
-    /// The cross-file index is built once on first call and memoized, so it is
-    /// paid only when a wildcard `match` names a qualified enum that no cheaper
-    /// exemption already covers.
-    pub fn crate_enum_has_cfg_gated_variant(&self, path: &Path, enum_name: &str) -> bool {
-        // Canonicalize first so the crate-root lookup key matches the index
-        // builder (which walks canonicalized `indexed_paths()`).
-        let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        let Some(manifest) = self.nearest_cargo_manifest(&canon) else {
-            return false;
+    /// The enum `enum_name` of crate `crate_name`, else of `path`'s crate.
+    pub fn rust_workspace_enum(
+        &self,
+        path: &Path,
+        crate_name: Option<&str>,
+        enum_name: &str,
+    ) -> Option<&EnumDecl> {
+        let Some(crate_name) = crate_name else {
+            // Canonical, like the index builder's `indexed_paths()`.
+            let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            let manifest = self.nearest_cargo_manifest(&canon)?;
+            return self
+                .rust_workspace_enums()
+                .get(manifest.manifest_dir())?
+                .get(enum_name);
         };
-        let index = self
-            .rust_cfg_gated_enums
-            .get_or_init(|| self.build_rust_cfg_gated_enums());
-        index
-            .get(manifest.manifest_dir())
-            .is_some_and(|names| names.contains(enum_name))
+        self.rust_workspace_enums().iter().find_map(|(dir, enums)| {
+            let decl = enums.get(enum_name)?;
+            let manifest = self.nearest_cargo_manifest(&dir.join("Cargo.toml"))?;
+            (manifest.crate_identifier().as_deref() == Some(crate_name)).then_some(decl)
+        })
     }
 
-    /// Build the crate-root → cfg-gated-enum-name map by enumerating the indexed
-    /// `.rs` files (no new filesystem walk — `indexed_paths()` is the per-run
-    /// file set already retained in memory). Each file is pre-filtered on the
-    /// literals `"enum"` and `"#[cfg"` before parsing, so a file that declares no
-    /// enum or carries no cfg attribute is skipped without paying tree-sitter.
-    fn build_rust_cfg_gated_enums(&self) -> FxHashMap<PathBuf, FxHashSet<String>> {
-        let mut map: FxHashMap<PathBuf, FxHashSet<String>> = FxHashMap::default();
+    fn rust_workspace_enums(&self) -> &FxHashMap<PathBuf, FxHashMap<String, EnumDecl>> {
+        self.rust_workspace_enums
+            .get_or_init(|| self.build_rust_workspace_enums())
+    }
+
+    fn build_rust_workspace_enums(&self) -> FxHashMap<PathBuf, FxHashMap<String, EnumDecl>> {
+        let mut map: FxHashMap<PathBuf, FxHashMap<String, EnumDecl>> = FxHashMap::default();
         let mut parser = tree_sitter::Parser::new();
         if parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_err() {
             return map;
@@ -3773,8 +3763,12 @@ impl ProjectCtx {
             let Ok(source) = std::fs::read_to_string(path) else {
                 continue;
             };
-            if !source.contains("enum") || !source.contains("#[cfg") {
-                continue; // fast prune: no cfg-gated enum variant possible
+            let declares_enum = source.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("enum ") || (line.starts_with("pub") && line.contains(" enum "))
+            });
+            if !declares_enum {
+                continue;
             }
             let Some(manifest) = self.nearest_cargo_manifest(path) else {
                 continue;
@@ -3782,13 +3776,12 @@ impl ProjectCtx {
             let Some(tree) = parser.parse(&source, None) else {
                 continue;
             };
-            let names = collect_cfg_gated_enum_names(tree.root_node(), source.as_bytes());
-            if names.is_empty() {
-                continue;
+            let crate_enums = map
+                .entry(manifest.manifest_dir().to_path_buf())
+                .or_default();
+            for (name, decl) in collect_enum_decls(tree.root_node(), source.as_bytes()) {
+                crate_enums.entry(name).or_default().merge(decl);
             }
-            map.entry(manifest.manifest_dir().to_path_buf())
-                .or_default()
-                .extend(names);
         }
         map
     }
@@ -7345,26 +7338,47 @@ fn collect_non_debug_trait_names(root: tree_sitter::Node, source: &[u8]) -> FxHa
     names
 }
 
-/// Names of enums declared under `root` that have at least one
-/// `#[cfg(...)]`/`#[cfg_attr(...)]`-gated variant. Walks every `enum_item`,
-/// including those nested in a `mod`, so a gated variant anywhere in the file is
-/// found. Such an enum has a target-dependent variant set: an arm list that
-/// names the gated variant fails to compile on the target that excludes it.
-fn collect_cfg_gated_enum_names(root: tree_sitter::Node, source: &[u8]) -> FxHashSet<String> {
-    let mut names = FxHashSet::default();
+/// A workspace enum's flags; same-name enums of one crate merge.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EnumDecl {
+    /// `#[non_exhaustive]`: another crate must keep a `_` arm.
+    pub non_exhaustive: bool,
+    /// A `#[cfg]`-gated variant: no arm list fits every target.
+    pub cfg_gated: bool,
+}
+
+impl EnumDecl {
+    fn merge(&mut self, other: Self) {
+        self.non_exhaustive |= other.non_exhaustive;
+        self.cfg_gated |= other.cfg_gated;
+    }
+}
+
+/// Every `enum_item` under `root`, nested `mod`s included, by name.
+pub(crate) fn collect_enum_decls(
+    root: tree_sitter::Node,
+    source: &[u8],
+) -> FxHashMap<String, EnumDecl> {
+    let mut decls: FxHashMap<String, EnumDecl> = FxHashMap::default();
     let mut cursor = root.walk();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         if node.kind() == "enum_item"
             && let Some(name_node) = node.child_by_field_name("name")
             && let Ok(name) = name_node.utf8_text(source)
-            && crate::rules::rust_helpers::enum_has_cfg_gated_variant(node, source)
         {
-            names.insert(name.to_owned());
+            decls.entry(name.to_owned()).or_default().merge(EnumDecl {
+                non_exhaustive: crate::rules::rust_helpers::has_outer_attribute(
+                    node,
+                    source,
+                    "non_exhaustive",
+                ),
+                cfg_gated: crate::rules::rust_helpers::enum_has_cfg_gated_variant(node, source),
+            });
         }
         stack.extend(node.children(&mut cursor));
     }
-    names
+    decls
 }
 
 /// True when `trait_item`'s supertrait `bounds` list names `Debug` — the bound's
