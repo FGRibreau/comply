@@ -570,7 +570,7 @@ fn run_cross_file_rules(
     let mut out = Vec::new();
     if files.len() >= 2 {
         if wants(clone_detection::RULE_ID) {
-            out.extend(clone_detection::lint_files(files));
+            out.extend(clone_detection::lint_files(files, config));
         }
         if wants(comment_duplicate_detection::RULE_ID) {
             out.extend(comment_duplicate_detection::lint_files(files, &[], config));
@@ -930,7 +930,7 @@ fn collect_all_diagnostics(
         let t = Instant::now();
         // The first file seen is canonical, so references go first.
         let all_refs: Vec<&SourceFile> = reference.iter().copied().chain(discovered).collect();
-        let d = clone_detection::lint_files(&all_refs);
+        let d = clone_detection::lint_files(&all_refs, config);
         (d, t.elapsed())
     };
     let dup_comments_work = || -> Vec<Diagnostic> {
