@@ -226,6 +226,15 @@ min = 3
 max = 4
 ```
 
+comply.toml is also the single source of clippy's configuration. Any `clippy.toml` key goes under `[clippy]`, copied as-is into the file comply hands to clippy:
+
+```toml
+[clippy]
+disallowed-methods = [{ path = "reqwest::get", reason = "use the shared Http client" }]
+```
+
+A `clippy.toml` or `.clippy.toml` at the workspace root is an error: comply names it, lists its keys to move under `[clippy]`, and does not run clippy. A key set both as a `[rules."clippy::…"]` threshold and under `[clippy]` is an error too. Clippy lints every target, tests included.
+
 Keep this file short — if you find yourself reaching for lots of overrides, that's usually a signal a rule needs fixing rather than silencing. Issues welcome.
 
 ## Suppressing diagnostics

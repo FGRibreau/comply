@@ -196,12 +196,16 @@ fn invoke_clippy_fix(workspace: &Path, _touched: &FxHashSet<&Path>, config: &Con
     cmd.args([
         "clippy",
         "--fix",
+        "--all-targets",
         "--allow-dirty",
         "--allow-staged",
         "--quiet",
         "--manifest-path",
     ]);
     cmd.arg(&manifest);
+    let (_clippy_conf_guard, clippy_conf_dir) = crate::clippy::config_writer::materialize(config)?;
+    let (key, val) = crate::clippy::config_writer::env_var_for_dir(&clippy_conf_dir);
+    cmd.env(key, val);
     cmd.arg("--");
 
     // Forward the same per-rule `-W`/`-A` flags the lint mode would,
