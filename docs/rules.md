@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2059 rules across 152 categories.
+2063 rules across 152 categories.
 
 ## Categories
 
@@ -127,7 +127,7 @@
 - [sql > constraints](#sql-constraints) (1 rules)
 - [sql > indexing](#sql-indexing) (2 rules)
 - [sql > migrations](#sql-migrations) (6 rules)
-- [style](#style) (1 rules)
+- [style](#style) (2 rules)
 - [tailwind](#tailwind) (23 rules)
 - [tailwind > accessibility](#tailwind-accessibility) (6 rules)
 - [tailwind > i18n](#tailwind-i18n) (1 rules)
@@ -2215,6 +2215,7 @@
 
 | Rule | Description | Remediation |
 |------|-------------|-------------|
+| `require-readable-spacing` | Missing blank line between logical statement groups: after a declaration run, before a `return` or `throw`, around a multi-line block. | Add an empty line between the two statements so each logical group reads on its own. |
 | `top-level-function` | Top-level arrow-function variables hide their name in stack traces and prevent hoisting — use a function declaration instead. | Replace `const foo = (…) => { … }` at module scope with `function foo(…) { … }`. Keep arrow functions for callbacks and inline expressions. |
 
 ## tailwind

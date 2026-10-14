@@ -313,6 +313,9 @@ entries = []
 [rules.node-no-callback-literal]
 disabled = true
 
+[rules.require-readable-spacing]
+disabled = true
+
 [rules.ts-explicit-function-return-type]
 disabled = true
 
