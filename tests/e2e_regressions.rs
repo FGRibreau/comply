@@ -185,6 +185,49 @@ fn migration_lock_timeout_ignores_framework_package_dirs() {
 }
 
 #[test]
+fn sql_migration_rules_skip_test_dirs_and_host_code() {
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let both_defects = "ALTER TABLE t ADD CONSTRAINT t_a_chk CHECK (a > 0) NOT VALID;\n\
+                        ALTER TABLE t VALIDATE CONSTRAINT t_a_chk;\n\
+                        UPDATE t SET a = replace(a, 'x', 'y') WHERE id = 1;\n";
+    let update = "UPDATE t SET a = replace(a, 'x', 'y') WHERE id = 1";
+    for (path, content) in [
+        ("migrations/002.sql", both_defects.to_string()),
+        ("tests/migrations/002.sql", both_defects.to_string()),
+        ("src/fix.sql", both_defects.to_string()),
+        (
+            "migrations/001_fix.rs",
+            format!("fn up() {{ let q = \"{update}\"; }}\n"),
+        ),
+        (
+            "migrations/001_fix.ts",
+            format!("export const up = `{update}`;\n"),
+        ),
+    ] {
+        let file = dir.path().join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, content).unwrap();
+    }
+
+    let output = common::comply().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let flagged: Vec<&str> = stdout
+        .lines()
+        .filter(|line| {
+            line.contains("[sql-validate-constraint-separate-migration]")
+                || line.contains("[sql-update-replace-needs-row-check]")
+        })
+        .collect();
+    assert_eq!(flagged.len(), 2, "{stdout}");
+    assert!(
+        flagged
+            .iter()
+            .all(|line| line.contains("/migrations/002.sql") && !line.contains("/tests/")),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn vue_and_tsx_backends_of_a_rule_anchor_on_the_same_construct() {
     // One defect, one element, two file types: `a11y-alt-text` reports the
     // `<img` opening tag in both, so moving a component from `.tsx` to `.vue`
