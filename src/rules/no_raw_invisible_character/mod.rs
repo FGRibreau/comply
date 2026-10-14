@@ -60,7 +60,7 @@ fn check_text(
     for (offset, c) in raw {
         let escaped = escape(c, escapes);
         let remedy = if in_raw_literal {
-            format!("move the text to a plain literal and write `{escaped}` there")
+            format!("move the text to a plain literal, where `{escaped}` decodes")
         } else {
             format!("write `{escaped}` instead")
         };

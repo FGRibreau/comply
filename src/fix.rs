@@ -1,38 +1,19 @@
-//! Auto-fix orchestration: run the fixers built into oxlint and clippy.
-//!
-//! Comply doesn't ship its own fixers — most of the in-process
-//! tree-sitter rules are architectural (max-function-lines, naming,
-//! Law of Demeter…) and can't be safely auto-fixed. The two upstream
-//! tools comply already delegates to (`oxlint` and `cargo clippy`)
-//! both have battle-tested fixers for the rules they own, so the
-//! best comply can do is forward `--fix` to them and let them edit
-//! source files in place.
-//!
-//! Pipeline:
-//!   1. `comply --fix <path>` discovers files (same scan logic as
-//!      a normal lint run).
-//!   2. For TS/JS files: invoke `oxlint --fix -- <files>`. The
-//!      generated oxlintrc still controls which rules are eligible.
-//!   3. For Rust files: group by workspace (same as the normal clippy
-//!      runner), then invoke `cargo clippy --fix --allow-dirty
-//!      --allow-staged --manifest-path X -- <lint args>`. The
-//!      `--allow-dirty/--allow-staged` flags let clippy edit a tree
-//!      with uncommitted changes; without them, clippy refuses.
-//!   4. After both tools finish, comply re-runs the normal lint pass
-//!      so the user sees what's left (the diagnostics nobody can
-//!      auto-fix). The caller of `apply_fixes` is responsible for
-//!      that re-run; this module edits the files.
-//!
-//! Loose `.rs` files outside any Cargo workspace are skipped with a
-//! warning, same as the regular clippy runner.
+//! `--fix` runs the oxlint and clippy fixers, then comply's own.
+//! Loose `.rs` files outside a Cargo workspace are skipped.
 
 use anyhow::{Context, Result};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 use crate::config::Config;
+use crate::diagnostic::Diagnostic;
 use crate::files::{Language, SourceFile};
+use crate::rules::{
+    copy_apostrophe_style, french_nbsp_before_punctuation, no_raw_invisible_character,
+};
 
 /// Run every available auto-fixer on the discovered files. Returns
 /// the number of fixer invocations that exited successfully — useful
@@ -62,10 +43,100 @@ pub fn apply_fixes(discovered: &[SourceFile], config: &Config) -> Result<usize> 
     Ok(runs)
 }
 
-/// Cheap availability probe — same idea as `oxlint::is_available`,
-/// duplicated here so the fix module doesn't reach into the lint
-/// module's private cache. Both call sites end up running once per
-/// invocation, which is negligible.
+/// Rewrites copy typography findings on disk, then drops them.
+/// Returns how many it rewrote. Paths resolve against `root`.
+/// A file that fails stays untouched and reported.
+pub fn rewrite_copy(diagnostics: &mut Vec<Diagnostic>, root: &Path) -> usize {
+    let mut by_path: FxHashMap<Arc<Path>, Vec<usize>> = FxHashMap::default();
+    for (index, diagnostic) in diagnostics.iter().enumerate() {
+        let is_copy = [
+            french_nbsp_before_punctuation::META.id,
+            no_raw_invisible_character::META.id,
+            copy_apostrophe_style::META.id,
+        ]
+        .contains(&diagnostic.rule_id.as_ref());
+        if is_copy && remedy(&diagnostic.message).is_some() {
+            by_path
+                .entry(Arc::clone(&diagnostic.path))
+                .or_default()
+                .push(index);
+        }
+    }
+    let mut rewritten = FxHashSet::default();
+    for (path, indices) in by_path {
+        let file = root.join(&path);
+        let findings: Vec<&Diagnostic> = indices.iter().map(|&i| &diagnostics[i]).collect();
+        match rewrite_file(&file, &findings) {
+            Ok(()) => rewritten.extend(indices),
+            Err(e) => eprintln!("comply: left {} untouched: {e:#}", file.display()),
+        }
+    }
+    let kept = std::mem::take(diagnostics)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !rewritten.contains(index))
+        .map(|(_, diagnostic)| diagnostic);
+    diagnostics.extend(kept);
+    rewritten.len()
+}
+
+/// Applies every finding's edit to `file`, or none.
+fn rewrite_file(file: &Path, findings: &[&Diagnostic]) -> Result<()> {
+    let mut text = std::fs::read_to_string(file).context("cannot read it")?;
+    let mut edits = findings
+        .iter()
+        .map(|finding| edit(&text, finding))
+        .collect::<Option<Vec<_>>>()
+        .context("a finding no longer matches its text")?;
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    for (range, replacement) in edits {
+        text.replace_range(range, replacement);
+    }
+    anyhow::ensure!(parses(file, &text), "the fixed text does not parse");
+    std::fs::write(file, text).context("cannot write it")
+}
+
+/// The byte range a finding rewrites, and its text.
+fn edit<'a>(text: &str, finding: &'a Diagnostic) -> Option<(Range<usize>, &'a str)> {
+    let (start, len) = finding.span?;
+    let replacement = remedy(&finding.message)?;
+    let range = if finding.rule_id == french_nbsp_before_punctuation::META.id {
+        // The escape goes before the mark, replacing a plain space.
+        let has_space = text.get(..start)?.ends_with(' ');
+        let space_start = start.checked_sub(usize::from(has_space))?;
+        space_start..start
+    } else {
+        start..start.checked_add(len)?
+    };
+    text.get(range.clone())?;
+    Some((range, replacement))
+}
+
+/// The remedy a message names after `write \``.
+fn remedy(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once("write `")?;
+    rest.split_once('`').map(|(replacement, _)| replacement)
+}
+
+/// True when `text` parses as the language of `path`.
+fn parses(path: &Path, text: &str) -> bool {
+    match Language::from_path(path) {
+        Some(Language::Rust) => {
+            let mut parser = tree_sitter::Parser::new();
+            crate::parsing::parse_with_grammar(&mut parser, Language::Rust, text.as_bytes())
+                .is_some_and(|tree| !tree.root_node().has_error())
+        }
+        // oxc, since tree-sitter's TS grammar rejects JSX in a `.js`.
+        Some(language) if language.is_typescript_family() => {
+            let allocator = oxc_allocator::Allocator::default();
+            let source_type = crate::oxc_helpers::source_type_for_path(path);
+            let parsed = oxc_parser::Parser::new(&allocator, text, source_type).parse();
+            parsed.errors.is_empty() && !parsed.panicked
+        }
+        _ => true,
+    }
+}
+
 fn oxlint_available() -> bool {
     Command::new("oxlint")
         .arg("--version")
@@ -196,6 +267,7 @@ fn invoke_clippy_fix(workspace: &Path, _touched: &FxHashSet<&Path>, config: &Con
     cmd.args([
         "clippy",
         "--fix",
+        // clippy refuses dirty or staged trees without these.
         "--allow-dirty",
         "--allow-staged",
         "--quiet",

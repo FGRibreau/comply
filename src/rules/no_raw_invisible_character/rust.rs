@@ -36,7 +36,7 @@ mod tests {
             ("fn f() { let _ = \"a\u{a0}b\"; }", "`\\u{a0}`"),
             (
                 "fn f() { let _ = r\"a\u{200b}b\"; }",
-                "move the text to a plain literal and write `\\u{200b}` there",
+                "move the text to a plain literal, where `\\u{200b}` decodes",
             ),
             ("fn f() { let _ = '\u{a0}'; }", "`\\u{a0}`"),
         ];
