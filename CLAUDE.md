@@ -28,3 +28,7 @@
 ## Suppression d'issues sur GitHub
 
 Pour les FP triés et fixés : le commit avec `Closes #N` les ferme automatiquement au merge du PR. Pour les doublons : `gh issue close N --comment "Duplicate of #M — ..."`.
+
+## Agent loop
+
+`loop-issues: automerge` — la loop `loop-issues` tourne en mode autonome sur ce dépôt : elle écrit les labels de file et fusionne chaque PR certifiée, sans attendre de go oral (Romain, 14/10/2026 : « tu peux merge les issues comply »).
