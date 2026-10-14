@@ -297,6 +297,15 @@ min_body_tokens = 10
 [rules.no-duplicate-type-definition]
 min_properties = 4
 
+# Forbidden characters in user-facing copy; their named HTML entities count too.
+# `scope`: "jsx-copy" (JSX text, copy attributes) or "all-strings" (adds every
+# string literal and template piece). Each `[[…entries]]` table holds a `regex`
+# and the `message` its match reports.
+[rules.no-em-dash-in-jsx-text]
+characters = ["—", "–"]
+scope = "jsx-copy"
+entries = []
+
 # ---------------------------------------------------------------
 # Disabled by default — opt-in only.
 # ---------------------------------------------------------------
