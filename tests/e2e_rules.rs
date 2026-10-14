@@ -66,3 +66,27 @@ fn homemade_async_state_is_skipped_in_a_generated_file() {
         .assert()
         .stdout(predicate::str::contains("no-homemade-async-state-union").not());
 }
+
+#[test]
+fn module_dependencies_skips_test_files() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let comply_toml = "[rules.module-dependencies]\nroot = \"src\"\n\n\
+        [rules.module-dependencies.modules]\nfailure = []\nlanguage = []\n";
+    let import = "import { c } from '../language/c';\n";
+    for (rel, source) in [
+        ("comply.toml", comply_toml),
+        ("src/language/c.ts", "export const c = 1;\n"),
+        ("src/failure/a.ts", import),
+        ("src/failure/a.test.ts", import),
+    ] {
+        let path = dir.path().join(rel);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        std::fs::write(path, source).expect("write fixture");
+    }
+    common::comply()
+        .args(["rules", "module-dependencies"])
+        .arg(dir.path())
+        .assert()
+        .stdout(predicate::str::contains("a.ts"))
+        .stdout(predicate::str::contains("a.test.ts").not());
+}

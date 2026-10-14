@@ -11,7 +11,7 @@
 - [accessibility > ui](#accessibility-ui) (2 rules)
 - [api](#api) (8 rules)
 - [api-design](#api-design) (6 rules)
-- [architecture](#architecture) (2 rules)
+- [architecture](#architecture) (3 rules)
 - [async](#async) (4 rules)
 - [axum > correctness](#axum-correctness) (1 rules)
 - [axum > deployment](#axum-deployment) (3 rules)
@@ -253,6 +253,7 @@
 | Rule | Description | Remediation |
 |------|-------------|-------------|
 | `layer-import-boundary` | Imports that cross hexagonal architecture layers break dependency inversion and make the domain untestable. | Domain must not import from infrastructure or application. Application must not import from infrastructure. Use dependency injection or ports/adapters instead. |
+| `module-dependencies` | An import between two source modules must be allowed by the project's declared module matrix. | Import through an allowed module, or declare the dependency in `[rules.module-dependencies.modules]`. |
 | `no-global-types-file` | Forbids global `types.ts` files at project root or shared locations. | Colocate types with the code that uses them, or use domain-specific type files. |
 
 ## async
