@@ -1,15 +1,8 @@
-//! tailwind-no-restricted-classes — flag classnames matching a
-//! user-configured blocklist.
+//! tailwind-no-restricted-classes — flag classes a project policy bans.
 //!
-//! The rule is opt-in via `comply.toml`:
-//!
-//! ```toml
-//! [rules.tailwind-no-restricted-classes]
-//! classes = ["bg-white", "text-black", "space-y-px"]
-//! ```
-//!
-//! When the `classes` list is absent or empty, the check is a no-op — no
-//! opinionated default blocklist fires on projects that never adopted one.
+//! Reads every class string: `className`, `cn`-style helpers, their constants.
+//! `classes` bans exact utilities; `entries` hold regex policies.
+//! Keys and defaults: `src/config/defaults.toml`.
 
 mod oxc_typescript;
 
@@ -21,7 +14,7 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "tailwind-no-restricted-classes",
-    description: "User-configured blocklist of Tailwind classes — typically used to ban legacy spacing tokens, ad-hoc colors, or deprecated utility names.",
+    description: "User-configured policy over Tailwind classes in every class string (`className`, `cn`, `cva`, `clsx`, constants): an exact blocklist plus regex entries with allow-lists, variant and context conditions, each with its own message.",
     remediation: "Use the project-approved equivalent. If the class is needed for a one-off, escape via the project's design-token override mechanism.",
     severity: Severity::Error,
     doc_url: None,

@@ -56,6 +56,7 @@ pub use registry::build_rust_only_rule;
 pub mod rust_helpers;
 pub mod shell_exec_helpers;
 pub mod sql_helpers;
+pub mod tailwind_class_strings;
 pub mod test_assertion_helpers;
 pub mod test_guard_helpers;
 #[cfg(test)]

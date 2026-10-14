@@ -438,8 +438,21 @@ max_letter_spacing_em = 0.05
 # enforce a design-system convention, e.g. an OKLCH-only palette that forbids
 # raw black/white or legacy `space-*` directional spacing:
 #   classes = ["bg-white", "bg-black", "text-white", "text-black", "space-y-px", "space-x-px"]
+#
+# `entries` are policy entries, empty by default. Each holds `pattern` (or
+# `all_of`, a list) and `message`; optional keys, with their defaults:
+#   [[rules.tailwind-no-restricted-classes.entries]]
+#   pattern = "^shadow"           # regex on the utility, variants stripped
+#   allow = []                    # utilities exempted
+#   allow_regex = "^shadow-card$" # unset: no exemption
+#   variant = []                  # set: only classes under one of these
+#   unless_variant = []           # classes under one of these pass
+#   context = "iteration-callback" # unset: everywhere
+#   requires = "^motion-reduce:"  # unset: no exemption
+#   message = "Use the design-system shadow."
 [rules.tailwind-no-restricted-classes]
 classes = []
+entries = []
 
 # Opt-in required-scripts check for package.json. Empty by default — the rule
 # is a no-op until a project lists the npm scripts it expects every package to

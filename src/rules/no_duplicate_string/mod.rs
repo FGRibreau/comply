@@ -35,6 +35,7 @@ use crate::files::Language;
 use crate::rules::RuleDef;
 use crate::rules::backend::Backend;
 use crate::rules::meta::RuleMeta;
+use crate::rules::tailwind_class_strings::CLASS_HELPERS;
 
 pub const META: RuleMeta = RuleMeta {
     id: "no-duplicate-string",
@@ -177,20 +178,6 @@ pub(crate) fn is_spec_literal(s: &str) -> bool {
         || MIME_PREFIXES.iter().any(|prefix| s.starts_with(prefix))
 }
 
-/// Identifiers of helpers that compose Tailwind class strings — calls
-/// to these mean their string arguments are class lists, not data
-/// constants worth extracting.
-const TAILWIND_HELPERS: &[&str] = &[
-    "cn",
-    "clsx",
-    "classnames",
-    "cva",
-    "tw",
-    "twMerge",
-    "twJoin",
-    "clx",
-];
-
 /// Decide whether a string-literal node sits in a context where
 /// extracting it to a constant doesn't make sense:
 ///
@@ -264,7 +251,7 @@ pub(super) fn should_ignore_string_node(node: tree_sitter::Node<'_>, source: &[u
                 if let Some(func) = parent.child_by_field_name("function") {
                     let text = func.utf8_text(source).unwrap_or("");
                     let last_segment = text.rsplit('.').next().unwrap_or(text);
-                    if TAILWIND_HELPERS.contains(&last_segment) {
+                    if CLASS_HELPERS.contains(&last_segment) {
                         return true;
                     }
                 }
