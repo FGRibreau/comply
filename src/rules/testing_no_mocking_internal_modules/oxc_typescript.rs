@@ -1,10 +1,12 @@
-//! testing-no-mocking-internal-modules OXC backend — detect `vi.mock`/`jest.mock`
-//! calls whose first argument is a relative path (`./` or `../`).
+//! testing-no-mocking-internal-modules OXC backend.
+//!
+//! Flags a relative mocked specifier.
+//! Under `include_packages`, any string specifier counts.
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::oxc_helpers::byte_offset_to_line_col;
 use crate::rules::backend::{AstKind, AstType, CheckCtx, OxcCheck};
-use oxc_ast::ast::Expression;
+use oxc_ast::ast::{Argument, Expression};
 use oxc_span::GetSpan;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -169,7 +171,7 @@ impl OxcCheck for Check {
     }
 
     fn prefilter(&self) -> Option<&'static [&'static str]> {
-        Some(&["jest.mock", "vi.mock"])
+        Some(&["jest.mock", "vi.mock", "doMock", "unstable_mockModule"])
     }
 
     fn run<'a>(
@@ -188,9 +190,11 @@ impl OxcCheck for Check {
             return;
         }
 
-        // Callee must be vi.mock or jest.mock
         let Expression::StaticMemberExpression(member) = &call.callee else { return };
-        if member.property.name.as_str() != "mock" {
+        if !matches!(
+            member.property.name.as_str(),
+            "mock" | "doMock" | "unstable_mockModule"
+        ) {
             return;
         }
         let Expression::Identifier(obj) = &member.object else { return };
@@ -204,28 +208,38 @@ impl OxcCheck for Check {
         let raw = &ctx.source[first_arg.span().start as usize..first_arg.span().end as usize];
         let path = unquote(raw);
 
-        if path.starts_with("./") || path.starts_with("../") {
+        let message = if path.starts_with("./") || path.starts_with("../") {
             // Mocking a module's own direct dependency to isolate the unit
             // under test is the intended unit-testing pattern, not coupling to
             // hidden internals — don't flag it.
             if mocks_subjects_direct_dependency(ctx.path, path) {
                 return;
             }
+            format!(
+                "Mocking internal module '{path}' couples tests to implementation details — mock boundaries, not internals."
+            )
+        } else if matches!(first_arg, Argument::StringLiteral(_))
+            && ctx
+                .config
+                .bool_flag(super::META.id, "include_packages", ctx.lang)
+        {
+            format!(
+                "Mocking package '{path}' couples tests to its API — inject the collaborator instead."
+            )
+        } else {
+            return;
+        };
 
-            let (line, column) =
-                byte_offset_to_line_col(ctx.source, first_arg.span().start as usize);
-            diagnostics.push(Diagnostic {
-                path: Arc::clone(&ctx.path_arc),
-                line,
-                column,
-                rule_id: super::META.id.into(),
-                message: format!(
-                    "Mocking internal module '{path}' couples tests to implementation details — mock boundaries, not internals."
-                ),
-                severity: Severity::Error,
-                span: None,
-            });
-        }
+        let (line, column) = byte_offset_to_line_col(ctx.source, first_arg.span().start as usize);
+        diagnostics.push(Diagnostic {
+            path: Arc::clone(&ctx.path_arc),
+            line,
+            column,
+            rule_id: super::META.id.into(),
+            message,
+            severity: Severity::Error,
+            span: None,
+        });
     }
 }
 
@@ -370,6 +384,22 @@ mod tests {
             run_on_disk(&test_path).len(),
             1,
             "mocking a module the subject does not import is still coupling and must be flagged"
+        );
+    }
+
+    #[test]
+    fn allows_package_mock_by_default() {
+        assert!(run("vi.mock('axios');", "x.test.ts").is_empty());
+        assert!(run("jest.mock('axios');", "x.test.ts").is_empty());
+        assert_eq!(run("vi.mock('./x');", "x.test.ts").len(), 1);
+    }
+
+    #[test]
+    fn flags_relative_mocks_through_added_callees() {
+        assert_eq!(run("vi.doMock('./x');", "x.test.ts").len(), 1);
+        assert_eq!(
+            run("jest.unstable_mockModule('./x', () => ({}));", "x.test.ts").len(),
+            1
         );
     }
 }

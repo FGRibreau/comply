@@ -1,5 +1,8 @@
-//! testing-no-mocking-internal-modules — flag `vi.mock('./...')` / `jest.mock('./...')`
-//! of relative internal paths. Tests should mock boundaries, not internals.
+//! testing-no-mocking-internal-modules — flag mocks of relative internal paths.
+//!
+//! Covers `mock`, `doMock` and `unstable_mockModule` on `vi`/`jest`.
+//! Tests should mock boundaries, not internals.
+//! With `include_packages`, package mocks are flagged too.
 
 mod oxc_typescript;
 
@@ -11,7 +14,8 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "testing-no-mocking-internal-modules",
-    description: "Mocking a relative internal module couples tests to implementation details.",
+    description: "Mocking a relative internal module (or any package, under `include_packages`) \
+                  couples tests to implementation details.",
     remediation: "Mock only external boundaries (HTTP, DB, third-party SDKs). Refactor so the collaborator is injected, or rely on the real internal module.",
     severity: Severity::Error,
     doc_url: None,
