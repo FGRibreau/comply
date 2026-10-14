@@ -906,6 +906,7 @@ fn collect_all_diagnostics(
             &by_lang.yaml,
             &by_lang.dockerfile,
             &by_lang.sql,
+            &by_lang.nginx,
         ] {
             if !bucket.is_empty() {
                 diags.extend(engine::lint_files_with_project(bucket, config, &project, None)?);
@@ -1093,6 +1094,7 @@ struct FilesByLanguage<'a> {
     yaml: Vec<&'a SourceFile>,
     dockerfile: Vec<&'a SourceFile>,
     sql: Vec<&'a SourceFile>,
+    nginx: Vec<&'a SourceFile>,
 }
 
 fn partition_by_language(discovered: &[SourceFile]) -> FilesByLanguage<'_> {
@@ -1112,6 +1114,7 @@ fn partition_by_language(discovered: &[SourceFile]) -> FilesByLanguage<'_> {
         yaml: of_language(Language::Yaml),
         dockerfile: of_language(Language::Dockerfile),
         sql: of_language(Language::Sql),
+        nginx: of_language(Language::Nginx),
     }
 }
 

@@ -92,6 +92,9 @@ pub enum Language {
     /// and everything it transitively imports — is recorded as reachable. No
     /// tree-sitter grammar is bundled; no lint rule targets it.
     Html,
+    /// nginx config: `nginx.conf`, `*.nginx`, `*.conf[.template]` under `nginx/`.
+    /// Detected by the scan only; text-based rules only.
+    Nginx,
 }
 
 impl Language {
@@ -113,6 +116,7 @@ impl Language {
             Language::Sql => "sql",
             Language::Markdown => "md",
             Language::Html => "html",
+            Language::Nginx => "nginx",
         }
     }
 
@@ -494,16 +498,26 @@ fn parse_git_output(stdout: &[u8]) -> Result<Vec<SourceFile>> {
         .collect())
 }
 
-/// Classify a file path into a Language based on its extension.
 /// Returns None for unsupported extensions (silently skipped).
 fn classify(path: &Path) -> Option<SourceFile> {
-    if let Some(name) = path.file_name().and_then(|n| n.to_str())
-        && (name.ends_with(".d.ts")
-            || name.ends_with(".d.mts")
-            || name.ends_with(".d.cts")
-            || name.ends_with(".d.tsx"))
-    {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let is_declaration_file = [".d.ts", ".d.mts", ".d.cts", ".d.tsx"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix));
+    if is_declaration_file {
         return None;
+    }
+    let is_nginx_name = name == "nginx.conf" || name.ends_with(".nginx");
+    let is_conf = name.ends_with(".conf") || name.ends_with(".conf.template");
+    let is_conf_under_nginx_dir = is_conf
+        && path
+            .parent()
+            .is_some_and(|dir| dir.components().any(|c| c.as_os_str() == "nginx"));
+    if is_nginx_name || is_conf_under_nginx_dir {
+        return Some(SourceFile {
+            path: path.to_path_buf(),
+            language: Language::Nginx,
+        });
     }
     let language = if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         if TS_EXTENSIONS.contains(&ext) {
@@ -597,6 +611,22 @@ mod tests {
             assert!(classify(&PathBuf::from(format!("foo.{ext}"))).is_none());
         }
         assert!(classify(&PathBuf::from("Makefile")).is_none());
+    }
+
+    #[test]
+    fn classify_nginx_globs() {
+        for path in [
+            "apps/webapp/nginx.conf",
+            "deploy/nginx/site.conf",
+            "nginx/default.conf.template",
+            "site.nginx",
+        ] {
+            let file = classify(&PathBuf::from(path)).unwrap();
+            assert_eq!(file.language, Language::Nginx, "{path}");
+        }
+        for path in ["etc/app.conf", "foo.conf.template"] {
+            assert!(classify(&PathBuf::from(path)).is_none(), "{path}");
+        }
     }
 
     #[test]

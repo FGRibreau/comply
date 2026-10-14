@@ -21,7 +21,8 @@ pub(crate) fn ts_language_for(language: Language) -> Option<tree_sitter::Languag
         | Language::Json
         | Language::Sql
         | Language::Markdown
-        | Language::Html => return None,
+        | Language::Html
+        | Language::Nginx => return None,
     })
 }
 

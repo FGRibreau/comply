@@ -1287,7 +1287,8 @@ fn grammar_family(lang: Language) -> Option<u8> {
         | Language::Json
         | Language::Sql
         | Language::Markdown
-        | Language::Html => None,
+        | Language::Html
+        | Language::Nginx => None,
     }
 }
 
