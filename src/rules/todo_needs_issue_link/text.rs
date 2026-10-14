@@ -33,53 +33,22 @@ fn find_marker_in_comment(line: &str) -> Option<(&'static str, &str)> {
 }
 
 /// Check whether `rest` (text after the marker) contains an issue reference.
-fn has_issue_ref(rest: &str) -> bool {
-    let bytes = rest.as_bytes();
-    let len = bytes.len();
-
-    for i in 0..len {
-        let b = bytes[i];
-
-        // `#\d+` — GitHub-style issue reference.
-        if b == b'#'
-            && i + 1 < len && bytes[i + 1].is_ascii_digit() {
-                return true;
-            }
-
-        // `https://` or `http://`
-        if b == b'h' && rest.is_char_boundary(i)
-            && (rest[i..].starts_with("http://") || rest[i..].starts_with("https://"))
-        {
-            return true;
-        }
-
-        // `[A-Z]+-\d+` — JIRA-style project key.
-        if b.is_ascii_uppercase() {
-            let mut j = i + 1;
-            while j < len && bytes[j].is_ascii_uppercase() {
-                j += 1;
-            }
-            if j > i && j < len && bytes[j] == b'-'
-                && j + 1 < len && bytes[j + 1].is_ascii_digit() {
-                    return true;
-                }
-        }
-    }
-
-    false
-}
-
-/// Check the full line (everything after the marker) for a reference,
-/// including inside parentheses right after the marker: `TODO(#123)`.
-fn line_has_ref(rest: &str, full_line: &str) -> bool {
-    // Check the rest of the line after the marker.
-    if has_issue_ref(rest) {
+fn has_issue_ref(rest: &str, allow_url: bool) -> bool {
+    if allow_url && ["http://", "https://"].iter().any(|s| rest.contains(s)) {
         return true;
     }
-    // Also check the full comment portion in case the reference appears
-    // before the marker text (unlikely but cheap).
-    let _ = full_line;
-    false
+    // A key inside a refused URL is not a reference.
+    rest.split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+        .filter(|word| !word.starts_with("http"))
+        .any(|word| {
+            let bytes = word.as_bytes();
+            bytes
+                .windows(2)
+                .any(|w| matches!(w, [b'#', d] if d.is_ascii_digit()))
+                || bytes.windows(3).any(
+                    |w| matches!(w, [k, b'-', d] if k.is_ascii_uppercase() && d.is_ascii_digit()),
+                )
+        })
 }
 
 /// Is `line` a comment line that continues the marker's comment block?
@@ -107,7 +76,7 @@ fn is_comment_continuation(line: &str) -> bool {
 /// inspecting that line — at the first line that is not a comment, is
 /// blank/whitespace-only (a gap breaks the block), or carries its own marker
 /// (that block belongs to the next TODO, not this one).
-fn block_has_ref(lines: &[&str], start: usize) -> bool {
+fn block_has_ref(lines: &[&str], start: usize, allow_url: bool) -> bool {
     for &line in &lines[start..] {
         if !is_comment_continuation(line) {
             return false;
@@ -115,7 +84,7 @@ fn block_has_ref(lines: &[&str], start: usize) -> bool {
         if find_marker_in_comment(line).is_some() {
             return false;
         }
-        if has_issue_ref(line) {
+        if has_issue_ref(line, allow_url) {
             return true;
         }
     }
@@ -126,29 +95,36 @@ impl TextCheck for Check {
     fn check(&self, ctx: &CheckCtx) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
         let lines: Vec<&str> = ctx.source.lines().collect();
+        let allow_url = ctx.config.bool_flag(super::META.id, "allow_url", ctx.lang);
 
         for (idx, line) in lines.iter().enumerate() {
             let Some((marker, rest)) = find_marker_in_comment(line) else {
                 continue;
             };
 
-            if line_has_ref(rest, line) {
+            if has_issue_ref(rest, allow_url) {
                 continue;
             }
 
-            if block_has_ref(&lines, idx + 1) {
+            if block_has_ref(&lines, idx.saturating_add(1), allow_url) {
                 continue;
             }
+
+            let message = if allow_url {
+                format!(
+                    "{marker} comment is missing an issue reference — \
+                     add a ticket number or URL (e.g. `{marker}(#1234)` or `{marker}(https://...)`)."
+                )
+            } else {
+                format!("{marker} comment is missing an issue number: write `{marker}(#1234)`.")
+            };
 
             diagnostics.push(Diagnostic {
                 path: std::sync::Arc::clone(&ctx.path_arc),
                 line: idx + 1,
                 column: 1,
                 rule_id: "todo-needs-issue-link".into(),
-                message: format!(
-                    "{marker} comment is missing an issue reference — \
-                     add a ticket number or URL (e.g. `{marker}(#1234)` or `{marker}(https://...)`)."
-                ),
+                message,
                 severity: Severity::Error,
                 span: None,
             });
@@ -334,5 +310,35 @@ mod tests {
         assert!(run("// TODO 💡 https://github.com/org/repo/issues/1").is_empty());
         let diags = run("// TODO 💡💡💡 fix this later");
         assert_eq!(diags.len(), 1);
+    }
+
+    fn run_without_url(source: &str) -> Vec<Diagnostic> {
+        let project_dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            project_dir.path().join("comply.toml"),
+            "[rules.todo-needs-issue-link]\nallow_url = false\n",
+        )
+        .expect("write cfg");
+        let config = crate::config::Config::load_from(project_dir.path()).expect("load cfg");
+        let ctx = CheckCtx {
+            config: &config,
+            ..CheckCtx::for_test(Path::new("t.ts"), source)
+        };
+        Check.check(&ctx)
+    }
+
+    #[test]
+    fn url_disallowed_flags_url_and_names_hash_form() {
+        let diags = run_without_url(
+            "// TODO(https://x/1)\n// TODO: x\n// https://x/1\n// TODO(https://jira.x/browse/ABC-12)\n",
+        );
+        assert_eq!(diags.len(), 3);
+        assert!(diags[0].message.contains("TODO(#1234)"));
+        assert!(!diags[0].message.contains("https"));
+    }
+
+    #[test]
+    fn url_disallowed_accepts_issue_number() {
+        assert!(run_without_url("// TODO(#12)").is_empty());
     }
 }

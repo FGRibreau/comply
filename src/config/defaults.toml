@@ -193,6 +193,10 @@ max = 10
 [rules.comment-max-block-words]
 max = 30
 
+# Set `allow_url = false` to accept only `TODO(#1234)`, not `TODO(https://…)`.
+[rules.todo-needs-issue-link]
+allow_url = true
+
 # When non-empty, jsdoc-missing-example only fires on files whose path matches
 # at least one of these glob patterns. Leave empty (the default) to require
 # @example on every exported function with JSDoc regardless of file location.
