@@ -63,7 +63,7 @@ pub fn is_available() -> bool {
 ///   - add `-W clippy::xxx` for any lint flagged `enabled = true`
 ///     in `[rules."clippy::xxx"]` (most clippy lints default to
 ///     `allow`, so this is how the user opts in to extra ones)
-///   - materialize a temporary `clippy.toml` from per-lint thresholds and
+///   - materialize a `clippy.toml` from per-lint thresholds and
 ///     `[clippy]`, and point cargo at it via `CLIPPY_CONF_DIR`, so something like
 ///     `[rules."clippy::too_many_lines"] threshold = 50` actually
 ///     reaches clippy
@@ -81,13 +81,8 @@ pub fn lint_files(
     }
     let bindings = crate::rules::collect_clippy_bindings();
     let remap = remap::build_table(&bindings);
-    let mut lint_args = build_lint_args(&bindings);
-    extend_with_user_enabled(&mut lint_args, config);
-    extend_with_user_disabled(&mut lint_args, config);
-
-    // Materialize the temp clippy.toml. The TempDir handle
-    // must outlive the cargo subprocess, so keep it bound here.
-    let (_clippy_conf_guard, clippy_conf_dir) = config_writer::materialize(config)?;
+    let lint_args = lint_args(&bindings, config);
+    let clippy_conf_dir = config_writer::materialize(config)?;
 
     let workspaces = group_by_workspace(files);
     // Every root is checked before any clippy run starts.
@@ -135,6 +130,19 @@ pub fn lint_files(
     }
 
     Ok(diagnostics)
+}
+
+/// The `-W`/`-A` flags passed after `--`, shared by lint and `--fix`:
+/// clippy records them in each crate's fingerprint, so any difference
+/// between the two modes re-lints the workspace when one follows the other.
+pub(crate) fn lint_args(
+    bindings: &[(&'static str, &'static RuleMeta, Severity)],
+    config: &Config,
+) -> Vec<String> {
+    let mut args = build_lint_args(bindings);
+    extend_with_user_enabled(&mut args, config);
+    extend_with_user_disabled(&mut args, config);
+    args
 }
 
 /// Append `-W clippy::xxx` for every clippy lint the user explicitly
