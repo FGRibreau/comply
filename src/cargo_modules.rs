@@ -66,8 +66,26 @@ fn scan_workspace(workspace: &Path) -> Result<Vec<Diagnostic>> {
     // cargo-modules writes its rustc-style warnings to STDOUT (not stderr,
     // contrary to most cargo subcommands) and exits non-zero when orphans
     // exist — we expect both, so we read stdout and ignore the exit code.
+    if let Some(cause) = load_failure(&String::from_utf8_lossy(&output.stderr)) {
+        // Silence here read as "no orphan": cargo-modules 0.25 could not load
+        // any crate of a repo pinned to cargo 1.98.1 and comply reported none.
+        eprintln!(
+            "comply: {RULE_ID} not checked in {}: cargo modules failed: {cause}",
+            workspace.display()
+        );
+        return Ok(vec![]);
+    }
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     Ok(parse_orphans(&stdout, workspace))
+}
+
+/// The deepest cause of a run that could not load the crate, `None` for a
+/// run that analysed it. Exit code 1 means both, only stderr's `Error:` tells.
+fn load_failure(stderr: &str) -> Option<&str> {
+    if !stderr.trim_start().starts_with("Error:") {
+        return None;
+    }
+    stderr.lines().map(str::trim).rfind(|line| !line.is_empty())
 }
 
 /// Strip ANSI color escapes and pull `at <path>` snippets out of the
@@ -152,6 +170,19 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].path.ends_with("src/rules/foo/rust.rs"));
         assert!(diagnostics[0].message.contains("rust"));
+    }
+
+    #[test]
+    fn load_failure_names_the_deepest_cause() {
+        let stderr = "Error: Failed to load the project at /p/Cargo.toml\n\nCaused by:\n    \
+                      0: Failed to read Cargo metadata\n    \
+                      2: `cargo metadata` exited with an error: unexpected argument '--lockfile-path'\n";
+        assert_eq!(
+            load_failure(stderr),
+            Some("2: `cargo metadata` exited with an error: unexpected argument '--lockfile-path'")
+        );
+        assert_eq!(load_failure(""), None);
+        assert_eq!(load_failure("   Compiling foo\n"), None);
     }
 
     #[test]
