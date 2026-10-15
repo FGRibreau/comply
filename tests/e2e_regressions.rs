@@ -852,10 +852,30 @@ fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
 }
 
 #[test]
+fn a_javascript_only_set_is_not_refused_for_a_missing_tsconfig() {
+    // JavaScript carries no type annotations.
+    // A missing tsconfig.json is then nothing to analyze.
+    // Refusing would block every commit on plain `.js`.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("app.js"),
+        "var total = 1;\nif (total == 2) { console.log(total); }\n",
+    )
+    .unwrap();
+
+    common::comply()
+        .arg(dir.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("app.js"))
+        .stderr(predicate::str::contains("tsconfig").not());
+}
+
+#[test]
 fn type_aware_rules_that_could_not_run_are_an_error_not_all_clear() {
-    // The type-aware phase needs a tsconfig.json.
-    // Without one it skipped its rules on a stderr notice.
-    // The run still ended on "all clear".
+    // The phase needs a tsconfig.json for its program.
+    // Without one it skipped every rule on a notice.
+    // The run still ended on "all clear", exit 0.
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("package.json"), "{\"name\":\"t\"}\n").unwrap();
     fs::write(
