@@ -148,6 +148,7 @@ fn migration_lock_timeout_ignores_framework_package_dirs() {
     // The framework's own DDL builders must not be flagged for a missing
     // `SET lock_timeout`; a real file under `migrations/` still is.
     let dir = TempDir::new().expect("failed to create temp dir");
+    common::without_type_aware_rules(dir.path());
     fs::create_dir_all(dir.path().join("node-pg-migrate/src/operations/tables"))
         .unwrap();
     fs::write(
@@ -356,6 +357,7 @@ fn diff_only_survives_a_non_utf8_file_in_the_diff_issue_8502() {
     // violation on the staged `.ts` line instead of linting nothing.
     let dir = TempDir::new().unwrap();
     let root = dir.path();
+    common::without_type_aware_rules(root);
     git(root, &["init", "-q"]);
     git(root, &["config", "user.email", "t@example.com"]);
     git(root, &["config", "user.name", "t"]);
@@ -597,6 +599,7 @@ fn ansi_fixture_does_not_cost_its_batch_its_diagnostics_issue_8402() {
     // to 500, so the sibling's oxlint diagnostic is what proves the batch — and
     // with it the run — survived. "Completes" alone would pass on zero output.
     let dir = TempDir::new().unwrap();
+    common::without_type_aware_rules(dir.path());
     fs::write(dir.path().join("package.json"), "{\"name\":\"t\"}\n").unwrap();
     fs::write(
         dir.path().join("ansi.ts"),
@@ -846,6 +849,27 @@ fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
     let fixed = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
     assert!(fixed.contains("is_empty()"), "{fixed}");
     assert!(fixed.contains("x >= 1 && x < 10"), "{fixed}");
+}
+
+#[test]
+fn type_aware_rules_that_could_not_run_are_an_error_not_all_clear() {
+    // The type-aware phase needs a tsconfig.json.
+    // Without one it skipped its rules on a stderr notice.
+    // The run still ended on "all clear".
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("package.json"), "{\"name\":\"t\"}\n").unwrap();
+    fs::write(
+        dir.path().join("a.ts"),
+        "export function addNumbers(left: number, right: number): number {\n  return left + right;\n}\n",
+    )
+    .unwrap();
+
+    common::comply()
+        .arg(dir.path())
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("all clear").not())
+        .stderr(predicate::str::contains("tsconfig.json"));
 }
 
 #[test]

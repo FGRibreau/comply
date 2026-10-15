@@ -1,13 +1,37 @@
 //! Shared helpers for E2E tests.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+/// A comply.toml opting a fixture out of type-aware rules.
+///
+/// Those rules need a tsconfig.json, which fixtures lack.
+/// comply refuses to skip them silently.
+const WITHOUT_TYPE_AWARE: &str = "\
+[rules.no-duplicate-type-definition]
+disabled = true
+
+[rules.no-redundant-nullish-coalescing-null]
+disabled = true
+
+[rules.ts-no-in-operator]
+disabled = true
+
+[rules.ts-no-typeof-operator]
+disabled = true
+";
+
+/// Opt the fixture in `dir` out of type-aware rules.
+pub fn without_type_aware_rules(dir: &Path) {
+    fs::write(dir.join("comply.toml"), WITHOUT_TYPE_AWARE).expect("failed to write comply.toml");
+}
 
 /// Write a TS file in a temp dir and return the dir + path.
 /// The TempDir must be held by the caller — its Drop deletes the directory.
 pub fn write_ts_file(name: &str, content: &str) -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("failed to create temp dir");
+    without_type_aware_rules(dir.path());
     let path = dir.path().join(name);
     fs::write(&path, content).expect("failed to write fixture");
     (dir, path)
