@@ -1,14 +1,7 @@
 //! Shared helpers for the external-tool subprocess runners.
 //!
-//! Every runner (cargo-shear, cargo-modules, jscpd, knip, madge, …)
-//! needs the same three primitives:
-//!
-//! 1. **Binary probe** — "is this CLI tool installed?"
-//! 2. **Workspace root walk** — "given a source file, find the nearest
-//!    ancestor directory containing `Cargo.toml` / `package.json`."
-//! 3. **Unique-root collection** — "given a list of files, collapse
-//!    them down to the set of distinct workspace roots so we don't
-//!    invoke the tool twice for the same project."
+//! Every runner (clippy, cargo-shear, …) needs a binary probe ("is this CLI
+//! tool installed?") and the cargo workspace root of a source file.
 //!
 //! Before this module existed each runner reimplemented all three.
 //! Five runners × ~36 lines each was the dominant clone-detection
@@ -19,7 +12,6 @@
 //! now `runner_helpers::probe_binary("cargo", &["shear", "--version"])`,
 //! which is one line.
 
-use rustc_hash::FxHashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,46 +28,23 @@ pub fn probe_binary(cmd: &str, args: &[&str]) -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
-/// Walk parents of `path` until we find a directory containing
-/// `marker_filename` (e.g. `Cargo.toml`, `package.json`). Returns the
-/// directory itself — NOT the manifest path. Canonicalizes `path` first
-/// so relative paths from the CLI still resolve to absolute roots.
-#[must_use]
-pub fn find_ancestor_with(path: &Path, marker_filename: &str) -> Option<PathBuf> {
-    let canonical = path.canonicalize().ok()?;
-    let mut current = canonical.parent();
-    while let Some(dir) = current {
-        if dir.join(marker_filename).is_file() {
-            return Some(dir.to_path_buf());
-        }
-        current = dir.parent();
-    }
-    None
-}
-
 /// Walk parents of `path` to the root of the *cargo workspace* it
 /// belongs to: the nearest ancestor `Cargo.toml` that declares a
 /// `[workspace]` table. Falls back to the nearest ancestor `Cargo.toml`
 /// (a standalone crate) when none declares a workspace. Returns the
 /// directory, not the manifest path.
 ///
-/// This is the cargo-aware counterpart to [`find_ancestor_with`], which
-/// stops at the *first* `Cargo.toml`. For a workspace member that first
-/// manifest is the member's own — grouping by it makes a runner compile
-/// each member separately instead of once per workspace. Resolving to the
-/// workspace root lets one `cargo` invocation cover every member with a
-/// shared build.
+/// The first `Cargo.toml` of a workspace member is the member's own —
+/// grouping by it makes a runner compile each member separately instead of
+/// once per workspace. Resolving to the workspace root lets one `cargo`
+/// invocation cover every member with a shared build.
 ///
 /// Detection is a textual `[workspace]` probe, so it does not honor
 /// `workspace.exclude`: a file under an excluded member is still
 /// attributed to the parent workspace.
 ///
 /// Pick this resolver for runners that accept `--workspace` and benefit
-/// from a shared build (clippy lint, cargo-shear). Pick [`find_ancestor_with`]
-/// for tools that must stay per-package — either because the tool has no
-/// workspace mode (`cargo modules orphans` walks one crate's module tree)
-/// or because a narrow blast radius is wanted (`clippy --fix` should only
-/// touch the member crates the user actually edited, not their siblings).
+/// from a shared build (clippy lint, cargo-shear).
 #[must_use]
 pub fn find_cargo_workspace_root(path: &Path) -> Option<PathBuf> {
     let canonical = path.canonicalize().ok()?;
@@ -133,21 +102,6 @@ fn owning_package(workspace: &Path, file: &Path) -> Option<String> {
         })
 }
 
-/// Collapse a slice of input files into the set of unique workspace
-/// roots they belong to. Files that don't live under any workspace
-/// (no ancestor with `marker_filename`) are silently dropped — the
-/// caller is expected to either skip them or warn separately.
-#[must_use]
-pub fn collect_unique_roots(files: &[&SourceFile], marker_filename: &str) -> FxHashSet<PathBuf> {
-    let mut roots = FxHashSet::default();
-    for f in files {
-        if let Some(root) = find_ancestor_with(&f.path, marker_filename) {
-            roots.insert(root);
-        }
-    }
-    roots
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,11 +112,6 @@ mod tests {
             "definitely-not-a-real-binary-xyz",
             &["--version"]
         ));
-    }
-
-    #[test]
-    fn find_ancestor_returns_none_for_nonexistent_path() {
-        assert!(find_ancestor_with(Path::new("/nonexistent/path"), "Cargo.toml").is_none());
     }
 
     #[test]

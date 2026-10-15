@@ -2,7 +2,7 @@
 
 # comply rule catalog
 
-2089 rules across 153 categories.
+2090 rules across 153 categories.
 
 ## Categories
 
@@ -103,7 +103,7 @@
 - [react-native](#react-native) (17 rules)
 - [react-native > security](#react-native-security) (1 rules)
 - [regex](#regex) (33 rules)
-- [rust](#rust) (80 rules)
+- [rust](#rust) (81 rules)
 - [rust > api](#rust-api) (3 rules)
 - [rust > architecture](#rust-architecture) (1 rules)
 - [rust > async](#rust-async) (1 rules)
@@ -1926,6 +1926,7 @@
 | `rust-no-unwrap` | No `.unwrap()` / `.expect()` in production code. | Handle the None / Err case explicitly. Use `?` with proper error propagation, or `unwrap_or_else` with a meaningful fallback. `unwrap()` turns runtime conditions into crashes. Tests are exempted — panicking inside a `#[test]` is a clean failure. |
 | `rust-no-unwrap-in-from-impl` | `From::from` must be infallible — no `.unwrap()` / `.expect()`. | Switch the trait to `TryFrom`. Its associated `Error` type lets the caller pattern-match on the failure mode instead of panicking. `From` is reserved for total conversions; if you can write `unwrap()`, you don't have a total conversion. |
 | `rust-ord-partial-ord-inconsistent` | `Ord` and `PartialOrd` are not implemented consistently (one derived, the other manual). | If both traits are present, the contract requires `partial_cmp(a, b) == Some(cmp(a, b))`. Mixing a derived `Ord` with a manual `PartialOrd` (or vice versa) typically desyncs them. Either derive both or implement both manually with care to keep them aligned. |
+| `rust-orphan-module` | Rust source file that no `mod` declaration loads. | Declare it from the parent module (`mod foo;`) or delete the file. |
 | `rust-panic-in-drop` | `Drop::drop` body contains `panic!` / `unwrap` / `expect` / `assert!`. | Panicking inside `Drop` during another panic aborts the process. `Drop` runs on every error path — it must never fail. Log the error, swallow it, or use a fallible alternative invoked before the value is dropped. |
 | `rust-partial-eq-without-eq` | Publicly reachable type derives `PartialEq` but not `Eq`. | When every field type is provably `Eq` (non-float primitives, known-`Eq` stdlib types, or local Eq-capable types) the type should also derive `Eq`. `Eq` is a marker trait signalling reflexivity (`x == x`), and many APIs (`HashSet`, `BTreeMap` keys via wrapping) require it. The rule reports only a type reachable from outside the crate. On a crate-private type, whoever needs `Eq` adds it in place; across the crate boundary the orphan rule stops a consumer from doing the same, which is why this runs at error severity. A field whose `Eq`-ness cannot be proven — a float (`f32`/`f64`), an imported/unknown type, or a generic type parameter — leaves the type exempt, since adding `Eq` would not compile. |
 | `rust-prefer-arc-clone` | `.clone()` on an `Arc` is visually identical to a deep clone — use `Arc::clone(&x)` to signal the cheap reference-count bump. | Replace `x.clone()` with `Arc::clone(&x)` to make the intent explicit. |

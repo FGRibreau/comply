@@ -381,6 +381,14 @@ pub struct ImportIndex {
     /// submodule file in its module tree, which `mod foo;` (unlike a `use`
     /// import) does not record as an import edge.
     mod_edges: FxHashMap<PathBuf, Vec<PathBuf>>,
+    /// Rust-only: every file some `mod foo;` resolves to.
+    rust_mod_children: FxHashSet<PathBuf>,
+    /// Rust-only: names of `mod foo;` declarations that resolved to no file
+    /// (inline-module nesting, `cfg_attr` paths): `rust-orphan-module` leaves a
+    /// file so named alone rather than guess.
+    rust_unresolved_mod_names: FxHashSet<String>,
+    /// Rust-only: directories whose modules an `include!` or a macro may declare.
+    rust_opaque_mod_dirs: FxHashSet<PathBuf>,
     /// Augmented (canonical) file → member names contributed to it by every
     /// `declare module '<specifier>' { … }` block in the project that resolves
     /// to it. TypeScript merges these members into the module's exports, so a
@@ -446,10 +454,13 @@ impl ImportIndex {
         // Rust resolution is more involved than TS: specifiers are not file
         // paths but module paths (`crate::a::b::Sym`) that need a module graph
         // built from `mod foo;` declarations. Build it once here.
-        let rust_graph = RustModuleGraph::build(&per_file, &known_paths);
+        let mut rust_graph = RustModuleGraph::build(&per_file, &known_paths);
         // Module-inclusion edges (`mod foo;`) for reachability — captured before
         // `rust_graph` is moved into the parallel resolve closure below.
         let mod_edges = rust_graph.mod_edges();
+        let rust_mod_children: FxHashSet<PathBuf> = mod_edges.values().flatten().cloned().collect();
+        let rust_unresolved_mod_names = std::mem::take(&mut rust_graph.unresolved_mod_names);
+        let rust_opaque_mod_dirs = std::mem::take(&mut rust_graph.opaque_mod_dirs);
 
         // Load module resolver (tsconfig paths + node_modules) for TS resolution.
         // Discovers all tsconfigs reachable from the indexed files so each
@@ -733,6 +744,9 @@ impl ImportIndex {
             star_edges,
             dynamic_import_dirs,
             mod_edges,
+            rust_mod_children,
+            rust_unresolved_mod_names,
+            rust_opaque_mod_dirs,
             augmented_exports,
             dom_tree_methods,
             client_reachable,
@@ -1072,6 +1086,24 @@ impl ImportIndex {
     /// after `ProjectCtx::load` returns.
     pub fn indexed_paths(&self) -> impl Iterator<Item = &Path> {
         self.exports.keys().map(PathBuf::as_path)
+    }
+
+    /// True when some indexed `mod foo;` declaration resolves to `path`.
+    #[must_use]
+    pub fn is_declared_rust_module(&self, path: &Path) -> bool {
+        self.rust_mod_children.contains(self.canonical_key(path))
+    }
+
+    /// True when a `mod <name>;` declaration matched no indexed file.
+    #[must_use]
+    pub fn has_unresolved_rust_mod(&self, name: &str) -> bool {
+        self.rust_unresolved_mod_names.contains(name)
+    }
+
+    /// True when an `include!` or a macro may declare the modules of `dir`.
+    #[must_use]
+    pub fn has_opaque_rust_mods_in(&self, dir: &Path) -> bool {
+        self.rust_opaque_mod_dirs.contains(dir)
     }
 }
 
@@ -1575,7 +1607,10 @@ struct FileExtract {
     /// `foo.rs` / `foo/mod.rs` into the crate's compilation but is not a `use`
     /// import, so reachability needs these to follow the module tree from a
     /// crate root down to `mod.rs` and submodule files.
-    mod_decls: Vec<String>,
+    mod_decls: Vec<ModDecl>,
+    /// Rust-only: an item-level `include!`, or a macro whose body declares a
+    /// `mod`, may load modules `mod_decls` cannot list.
+    declares_opaque_mods: bool,
     /// TypeScript module augmentations declared in this file: each
     /// `declare module '<specifier>' { … }` block paired with the member names
     /// it adds to the augmented module's namespace. The augmented members
@@ -1665,7 +1700,8 @@ fn extract_for(parser: &mut Parser, file: &SourceFile) -> Option<(PathBuf, FileE
         let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
         parser.set_language(&lang).ok()?;
         let tree = parser.parse(source.as_bytes(), None)?;
-        let (exports, imports, mod_decls) = extract_rust(&tree, source.as_bytes());
+        let (exports, imports, mod_decls, declares_opaque_mods) =
+            extract_rust(&tree, source.as_bytes());
         let canon = std::fs::canonicalize(&file.path).unwrap_or_else(|_| file.path.clone());
         // Cross-file call-site tracking is TS-only for now.
         return Some((
@@ -1677,6 +1713,7 @@ fn extract_for(parser: &mut Parser, file: &SourceFile) -> Option<(PathBuf, FileE
                 dynamic_dirs: Vec::new(),
                 glob_imports: Vec::new(),
                 mod_decls,
+                declares_opaque_mods,
                 module_augmentations: Vec::new(),
                 dom_tree_methods: DomTreeMethods::default(),
                 has_use_client: false,
@@ -1825,6 +1862,7 @@ fn extract_vue(parser: &mut Parser, source: &str, path: &Path) -> Option<(PathBu
             dynamic_dirs,
             glob_imports,
             mod_decls: Vec::new(),
+            declares_opaque_mods: false,
             module_augmentations: Vec::new(),
             dom_tree_methods: DomTreeMethods::default(),
             has_use_client: false,
@@ -3574,6 +3612,7 @@ fn extract_ts_oxc(source: &str, path: &Path) -> Option<FileExtract> {
         dynamic_dirs,
         glob_imports,
         mod_decls: Vec::new(),
+        declares_opaque_mods: false,
         module_augmentations,
         dom_tree_methods,
         has_use_client: false,
@@ -5644,10 +5683,11 @@ impl OxcPathResolver {
 fn extract_rust(
     tree: &tree_sitter::Tree,
     source: &[u8],
-) -> (Vec<ExportedSymbol>, Vec<ImportedSymbol>, Vec<String>) {
+) -> (Vec<ExportedSymbol>, Vec<ImportedSymbol>, Vec<ModDecl>, bool) {
     let mut exports = Vec::new();
     let mut imports = Vec::new();
     let mut mod_decls = Vec::new();
+    let mut declares_opaque_mods = false;
     walk_tree(tree, |node| match node.kind() {
         "function_item" | "struct_item" | "enum_item" | "trait_item" | "type_item"
         | "const_item" | "static_item" => extract_rust_item(node, source, &mut exports),
@@ -5660,13 +5700,86 @@ fn extract_rust(
             if node.child_by_field_name("body").is_none()
                 && let Some(name) = rust_item_name(node, source)
             {
-                mod_decls.push(name);
+                let path = mod_path_attribute(node, source);
+                mod_decls.push(ModDecl { name, path });
             }
         }
         "use_declaration" => extract_rust_use(node, source, &mut exports, &mut imports),
+        "macro_invocation" => {
+            declares_opaque_mods |= macro_may_declare_mods(node, source);
+        }
         _ => {}
     });
-    (exports, imports, mod_decls)
+    (exports, imports, mod_decls, declares_opaque_mods)
+}
+
+/// True for an item-level `include!`, or an item-level macro (`cfg_if!`, …)
+/// whose token tree holds a `mod foo;`.
+fn macro_may_declare_mods(node: tree_sitter::Node, source: &[u8]) -> bool {
+    // `include!(…);` at item level parses as an expression statement.
+    let container = node.parent().map(|p| match p.kind() {
+        "expression_statement" => p.parent(),
+        _ => Some(p),
+    });
+    let at_item_level = container
+        .flatten()
+        .is_some_and(|p| matches!(p.kind(), "source_file" | "declaration_list"));
+    let Ok(text) = node.utf8_text(source) else {
+        return false;
+    };
+    at_item_level && (text.starts_with("include!") || text_declares_mod(text))
+}
+
+/// True when `text` holds `mod <ident>;` as tokens.
+fn text_declares_mod(text: &str) -> bool {
+    text.match_indices("mod").any(|(at, _)| {
+        let before_is_boundary =
+            !text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+        let rest = &text[at + 3..];
+        let name = rest.trim_start();
+        let ident_len = name
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(name.len());
+        before_is_boundary
+            && rest.len() > name.len()
+            && ident_len > 0
+            && name[ident_len..].trim_start().starts_with(';')
+    })
+}
+
+/// A file-backed `mod foo;` declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModDecl {
+    name: String,
+    /// `#[path = "…"]`, relative to the declaring file's directory.
+    path: Option<String>,
+}
+
+/// The literal of a `#[path = "…"]` outer attribute on `mod_item`. A path set
+/// through `cfg_attr` is not read: that module stays unresolved.
+fn mod_path_attribute(mod_item: tree_sitter::Node, source: &[u8]) -> Option<String> {
+    let mut sibling = mod_item.prev_named_sibling();
+    while let Some(node) = sibling {
+        match node.kind() {
+            "attribute_item" => {
+                let text = node.utf8_text(source).ok()?;
+                let value = text
+                    .strip_prefix("#[")
+                    .and_then(|t| t.strip_suffix(']'))
+                    .and_then(|t| t.trim().strip_prefix("path"))
+                    .and_then(|t| t.trim_start().strip_prefix('='))
+                    .and_then(|t| t.trim().strip_prefix('"'))
+                    .and_then(|t| t.strip_suffix('"'));
+                if let Some(value) = value {
+                    return Some(value.to_owned());
+                }
+            }
+            "line_comment" | "block_comment" => {}
+            _ => return None,
+        }
+        sibling = node.prev_named_sibling();
+    }
+    None
 }
 
 /// Emit an export for a `pub`-qualified item. Non-`pub` items are ignored —
@@ -5935,6 +6048,11 @@ struct RustModuleGraph {
     /// `(file, child_mod_name)` → resolved child file. Built from `pub mod foo;`
     /// declarations found during extraction.
     children: FxHashMap<(PathBuf, String), PathBuf>,
+    /// Names of `mod foo;` declarations that matched no indexed file.
+    unresolved_mod_names: FxHashSet<String>,
+    /// Directories a file with [`FileExtract::declares_opaque_mods`] loads
+    /// modules from.
+    opaque_mod_dirs: FxHashSet<PathBuf>,
 }
 
 impl RustModuleGraph {
@@ -5953,7 +6071,7 @@ impl RustModuleGraph {
         // private ones matter for reachability (a private `mod foo;` still pulls
         // `foo.rs` into the crate) and let `use crate::foo::…` resolve through
         // crate-internal modules regardless of their visibility.
-        let mut declared_mods: FxHashMap<PathBuf, Vec<String>> = FxHashMap::default();
+        let mut declared_mods: FxHashMap<PathBuf, Vec<ModDecl>> = FxHashMap::default();
         for (path, extract) in per_file {
             if !matches!(path.extension().and_then(|e| e.to_str()), Some("rs")) {
                 continue;
@@ -5997,32 +6115,49 @@ impl RustModuleGraph {
             }
         }
 
-        // Build children: for each file declaring `mod foo;`, probe
-        // `foo.rs` / `foo/mod.rs` in its child search directory.
+        // Build children: for each file declaring `mod foo;`, probe its
+        // `#[path]`, else `foo.rs` / `foo/mod.rs` in its child search directory.
         let mut children = FxHashMap::default();
+        let mut unresolved_mod_names = FxHashSet::default();
         for (parent_file, mods) in &declared_mods {
-            for dir in rust_child_search_dirs(parent_file) {
-                for m in mods {
-                    if children.contains_key(&(parent_file.clone(), m.clone())) {
-                        continue;
+            let Some(parent_dir) = parent_file.parent() else {
+                continue;
+            };
+            let dir = rust_child_search_dir(parent_file);
+            for m in mods {
+                let candidates = match &m.path {
+                    Some(path) => vec![parent_dir.join(path)],
+                    None => vec![
+                        dir.join(format!("{}.rs", m.name)),
+                        dir.join(&m.name).join("mod.rs"),
+                    ],
+                };
+                let resolved = candidates
+                    .iter()
+                    .filter_map(|candidate| std::fs::canonicalize(candidate).ok())
+                    .find(|c| known_paths.contains(c));
+                match resolved {
+                    Some(c) => {
+                        children.insert((parent_file.clone(), m.name.clone()), c);
                     }
-                    let flat = dir.join(format!("{m}.rs"));
-                    let modrs = dir.join(m).join("mod.rs");
-                    for candidate in [&flat, &modrs] {
-                        if let Ok(c) = std::fs::canonicalize(candidate)
-                            && known_paths.contains(&c)
-                        {
-                            children.insert((parent_file.clone(), m.clone()), c);
-                            break;
-                        }
+                    None => {
+                        unresolved_mod_names.insert(m.name.clone());
                     }
                 }
             }
         }
 
+        let opaque_mod_dirs = per_file
+            .iter()
+            .filter(|(_, extract)| extract.declares_opaque_mods)
+            .map(|(path, _)| rust_child_search_dir(path))
+            .collect();
+
         Self {
             crate_root,
             children,
+            unresolved_mod_names,
+            opaque_mod_dirs,
         }
     }
 
@@ -6149,25 +6284,40 @@ impl RustModuleGraph {
     }
 }
 
-/// Directories to search for a `mod foo;` declared in `parent_file`:
-/// - `lib.rs` / `main.rs` / `mod.rs` declare children in their own directory.
-/// - A non-`mod.rs` file `x.rs` declares children in a sibling `x/` directory.
-fn rust_child_search_dirs(parent_file: &Path) -> Vec<PathBuf> {
-    let Some(parent_dir) = parent_file.parent() else {
-        return Vec::new();
+/// The directory a file's `mod foo;` resolves in: its own directory for a
+/// crate root or a `mod.rs`, `<dir>/<stem>/` for any other module file.
+fn rust_child_search_dir(parent_file: &Path) -> PathBuf {
+    let parent_dir = parent_file.parent().unwrap_or(Path::new(""));
+    let is_mod_rs = parent_file.file_name().is_some_and(|n| n == "mod.rs");
+    if is_mod_rs || is_conventional_rust_crate_root(parent_file) {
+        return parent_dir.to_path_buf();
+    }
+    let stem = parent_file.file_stem().unwrap_or_default();
+    parent_dir.join(stem)
+}
+
+/// True for a file Cargo compiles as a crate root by convention: any `lib.rs`
+/// / `main.rs`, `build.rs`, and a direct child of a member's `src/bin/`,
+/// `tests/`, `benches/` or `examples/`. A `[[bin]] path` elsewhere is not seen
+/// here: its `mod` declarations stay unresolved rather than misresolved.
+pub(crate) fn is_conventional_rust_crate_root(path: &Path) -> bool {
+    let Some(dir) = path.parent() else {
+        return false;
     };
-    let name = parent_file
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
-    if matches!(name, "lib.rs" | "main.rs" | "mod.rs") {
-        vec![parent_dir.to_path_buf()]
-    } else {
-        let stem = parent_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        vec![parent_dir.join(stem)]
+    let has_manifest = |d: &Path| d.join("Cargo.toml").is_file();
+    match path.file_name().and_then(|n| n.to_str()) {
+        Some("lib.rs" | "main.rs") => return true,
+        Some("build.rs") => return has_manifest(dir),
+        _ => {}
+    }
+    match dir.file_name().and_then(|n| n.to_str()) {
+        Some("tests" | "benches" | "examples") => dir.parent().is_some_and(has_manifest),
+        Some("bin") => dir
+            .parent()
+            .filter(|src| src.file_name().is_some_and(|n| n == "src"))
+            .and_then(Path::parent)
+            .is_some_and(has_manifest),
+        _ => false,
     }
 }
 
@@ -8407,6 +8557,7 @@ mod tests {
             dynamic_dirs,
             glob_imports,
             mod_decls: Vec::new(),
+            declares_opaque_mods: false,
             module_augmentations: Vec::new(),
             dom_tree_methods,
             has_use_client: false,
