@@ -616,7 +616,7 @@ fn lint_with_rules(
     let (diagnostics, clean_files) = if filter.iter().any(|id| rule_requires_subprocess(id)) {
         let type_aware = filter.iter().any(|id| rule_requires_type_aware(id));
         let mut timings = Timings::default();
-        collect_all_diagnostics(&discovered, &config, &mut timings, type_aware, false)?
+        collect_all_diagnostics(&discovered, &config, &mut timings, type_aware, cli::Coverage::Full)?
     } else {
         let all_refs: Vec<&SourceFile> = discovered.iter().collect();
         let project = std::sync::Arc::new(crate::project::ProjectCtx::load(&all_refs, &config));
@@ -698,7 +698,7 @@ fn lint_project(cli: &Cli) -> Result<bool> {
         &config,
         &mut timings,
         type_aware_rules_active(&discovered, &config),
-        cli.is_partial_scan(),
+        cli.coverage(),
     )?;
 
     let t_post = Instant::now();
@@ -796,8 +796,9 @@ fn collect_all_diagnostics(
     config: &Config,
     timings: &mut Timings,
     type_aware: bool,
-    is_partial: bool,
+    coverage: cli::Coverage,
 ) -> Result<(Vec<Diagnostic>, FxHashSet<std::path::PathBuf>)> {
+    let is_partial = coverage.is_partial();
     let by_lang = partition_by_language(discovered);
     let mut diagnostics = Vec::with_capacity(discovered.len());
 
@@ -889,7 +890,7 @@ fn collect_all_diagnostics(
             )?);
         }
         if !by_lang.rs.is_empty() {
-            diags.extend(lint_rust(&by_lang.rs, config, &project, timings, is_partial)?);
+            diags.extend(lint_rust(&by_lang.rs, config, &project, timings, coverage)?);
         }
         if !by_lang.vue.is_empty() {
             let t = Instant::now();
@@ -1013,7 +1014,7 @@ fn lint_rust(
     config: &Config,
     project: &std::sync::Arc<crate::project::ProjectCtx>,
     timings: &mut Timings,
-    is_partial: bool,
+    coverage: cli::Coverage,
 ) -> Result<Vec<Diagnostic>> {
     // clippy, cargo-shear and cargo-modules each back Rust rules; none is
     // optional, since a missing one would silently under-report. Refuse to run
@@ -1051,7 +1052,7 @@ fn lint_rust(
 
     let clippy_phase = || -> PhaseOut {
         let t = Instant::now();
-        (clippy::lint_files(rs_files, config, is_partial), t.elapsed())
+        (clippy::lint_files(rs_files, config, coverage.is_partial()), t.elapsed())
     };
     let shear_phase = || -> PhaseOut {
         let t = Instant::now();
@@ -1059,6 +1060,9 @@ fn lint_rust(
     };
     let modules_phase = || -> PhaseOut {
         let t = Instant::now();
+        if coverage == cli::Coverage::Staged {
+            return (Ok(Vec::new()), t.elapsed());
+        }
         (cargo_modules::lint_files(rs_files), t.elapsed())
     };
     let project2 = std::sync::Arc::clone(project);
