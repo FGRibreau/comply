@@ -60,7 +60,7 @@ pub struct Cli {
     pub fix: bool,
 
     /// Print per-phase timing breakdown to stderr (discovery, oxlint,
-    /// clippy, cargo-shear, cargo-modules, engine, ...). Dev-only flag
+    /// clippy, cargo-shear, engine, ...). Dev-only flag
     /// used to profile where comply spends its wall-clock.
     #[arg(long)]
     pub timings: bool,
@@ -171,33 +171,9 @@ pub enum ScanMode {
     Range(String, String),
 }
 
-/// How much of the repo a run lints; decides which workspace-wide backends run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Coverage {
-    Full,
-    /// A git file scope (working tree, commit, range): cross-file rules index the whole tree.
-    Diff,
-    /// `--staged`, the pre-commit path: a diff that also skips the slowest
-    /// workspace-wide backend (cargo-modules loads rust-analyzer on the whole
-    /// workspace), left to the `--range` and full runs.
-    Staged,
-}
-
-impl Coverage {
-    pub fn is_partial(self) -> bool {
-        self != Self::Full
-    }
-}
-
 impl Cli {
-    pub fn coverage(&self) -> Coverage {
-        if self.staged {
-            return Coverage::Staged;
-        }
-        if self.working_tree || self.last_commit || self.commit.is_some() || self.range.is_some() {
-            return Coverage::Diff;
-        }
-        Coverage::Full
+    pub fn is_partial_scan(&self) -> bool {
+        self.working_tree || self.staged || self.last_commit || self.commit.is_some() || self.range.is_some()
     }
 
     pub fn scan_mode(&self) -> ScanMode {

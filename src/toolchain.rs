@@ -1,7 +1,7 @@
 //! Mandatory external toolchains.
 //!
 //! comply delegates part of its rule set to programs it does not own: clippy,
-//! cargo-shear, cargo-modules, oxlint, and the typescript-go checker behind the
+//! cargo-shear, oxlint, and the typescript-go checker behind the
 //! type-aware sidecar. None is optional. Skipping one would silently
 //! under-report, so comply refuses to run rather than print a false "clean".
 //!

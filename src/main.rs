@@ -14,7 +14,6 @@
 //! 5. Apply comply-ignore suppressions across every discovered file.
 //! 6. Format diagnostics, print, exit 0/1/2.
 
-mod cargo_modules;
 mod cargo_shear;
 mod catalog;
 mod changed_lines;
@@ -125,7 +124,6 @@ mod tests {
         assert!(is_known_rule_id(clone_detection::RULE_ID));
         assert!(is_known_rule_id(comment_duplicate_detection::RULE_ID));
         // Cargo subprocess detectors (absent from `all_rule_defs`).
-        assert!(is_known_rule_id(cargo_modules::RULE_ID));
         assert!(is_known_rule_id(cargo_shear::RULE_ID));
         // Unknown IDs are still rejected so the subcommand keeps erroring on typos.
         assert!(!is_known_rule_id("not-a-real-rule"));
@@ -135,7 +133,6 @@ mod tests {
     fn subprocess_routing_special_cases_standalone_rules() {
         // Cargo-backed rules live outside the engine and need a subprocess,
         // so `comply rules` must route them through the full pipeline.
-        assert!(rule_requires_subprocess(cargo_modules::RULE_ID));
         assert!(rule_requires_subprocess(cargo_shear::RULE_ID));
         // In-process cross-file detectors run on the fast path instead.
         assert!(!rule_requires_subprocess(clone_detection::RULE_ID));
@@ -450,7 +447,6 @@ struct Timings {
     type_aware: Duration,
     clippy: Duration,
     cargo_shear: Duration,
-    cargo_modules: Duration,
     engine_rs: Duration,
     engine_vue: Duration,
     clones: Duration,
@@ -478,7 +474,6 @@ fn print_timings(t: &Timings) {
     eprintln!("  -- rust --");
     eprintln!("  clippy        {}", fmt_ms(t.clippy));
     eprintln!("  cargo-shear   {}", fmt_ms(t.cargo_shear));
-    eprintln!("  cargo-modules {}", fmt_ms(t.cargo_modules));
     eprintln!("  engine (rs)   {}", fmt_ms(t.engine_rs));
     eprintln!("  -- vue --");
     eprintln!("  engine (vue)  {}", fmt_ms(t.engine_vue));
@@ -492,7 +487,7 @@ fn print_timings(t: &Timings) {
 /// Cargo-backed subprocess detectors, absent from `all_rule_defs()`.
 /// Producing them requires shelling out to cargo, so a `comply rules` filter
 /// naming one routes through the full `collect_all_diagnostics` pipeline.
-const CARGO_SUBPROCESS_RULE_IDS: &[&str] = &[cargo_modules::RULE_ID, cargo_shear::RULE_ID];
+const CARGO_SUBPROCESS_RULE_IDS: &[&str] = &[cargo_shear::RULE_ID];
 
 /// Whether `id` names a rule comply can emit — an engine rule, an in-process
 /// cross-file detector, or a subprocess-backed rule.
@@ -502,7 +497,7 @@ pub(crate) fn is_known_rule_id(id: &str) -> bool {
 }
 
 /// Whether producing `id` requires an external subprocess (oxlint, clippy,
-/// tsgolint, tsc, cargo-shear, cargo-modules). The in-process engine returns
+/// tsgolint, tsc, cargo-shear). The in-process engine returns
 /// nothing for these backends, so `comply rules` must run the full pipeline.
 fn rule_requires_subprocess(id: &str) -> bool {
     use crate::rules::backend::Backend;
@@ -587,8 +582,8 @@ fn run_cross_file_rules(
 /// In-process rules (engine rules plus the `no-clones` / `no-duplicate-comments`
 /// cross-file detectors) run through the filtered engine and a direct
 /// cross-file dispatch, keeping per-rule runs fast. When the filter names a
-/// subprocess-backed rule (oxlint, clippy, tsgolint, cargo-shear,
-/// cargo-modules) the full pipeline runs and the result is narrowed to the
+/// subprocess-backed rule (oxlint, clippy, tsgolint, cargo-shear) the full
+/// pipeline runs and the result is narrowed to the
 /// requested rules afterwards.
 fn lint_with_rules(
     filter: &[String],
@@ -616,7 +611,7 @@ fn lint_with_rules(
     let (diagnostics, clean_files) = if filter.iter().any(|id| rule_requires_subprocess(id)) {
         let type_aware = filter.iter().any(|id| rule_requires_type_aware(id));
         let mut timings = Timings::default();
-        collect_all_diagnostics(&discovered, &config, &mut timings, type_aware, cli::Coverage::Full)?
+        collect_all_diagnostics(&discovered, &config, &mut timings, type_aware, false)?
     } else {
         let all_refs: Vec<&SourceFile> = discovered.iter().collect();
         let project = std::sync::Arc::new(crate::project::ProjectCtx::load(&all_refs, &config));
@@ -698,7 +693,7 @@ fn lint_project(cli: &Cli) -> Result<bool> {
         &config,
         &mut timings,
         type_aware_rules_active(&discovered, &config),
-        cli.coverage(),
+        cli.is_partial_scan(),
     )?;
 
     let t_post = Instant::now();
@@ -796,9 +791,8 @@ fn collect_all_diagnostics(
     config: &Config,
     timings: &mut Timings,
     type_aware: bool,
-    coverage: cli::Coverage,
+    is_partial: bool,
 ) -> Result<(Vec<Diagnostic>, FxHashSet<std::path::PathBuf>)> {
-    let is_partial = coverage.is_partial();
     let by_lang = partition_by_language(discovered);
     let mut diagnostics = Vec::with_capacity(discovered.len());
 
@@ -890,7 +884,7 @@ fn collect_all_diagnostics(
             )?);
         }
         if !by_lang.rs.is_empty() {
-            diags.extend(lint_rust(&by_lang.rs, config, &project, timings, coverage)?);
+            diags.extend(lint_rust(&by_lang.rs, config, &project, timings, is_partial)?);
         }
         if !by_lang.vue.is_empty() {
             let t = Instant::now();
@@ -1014,9 +1008,9 @@ fn lint_rust(
     config: &Config,
     project: &std::sync::Arc<crate::project::ProjectCtx>,
     timings: &mut Timings,
-    coverage: cli::Coverage,
+    is_partial: bool,
 ) -> Result<Vec<Diagnostic>> {
-    // clippy, cargo-shear and cargo-modules each back Rust rules; none is
+    // clippy and cargo-shear each back Rust rules; neither is
     // optional, since a missing one would silently under-report. Refuse to run
     // rather than report a false "clean".
     require_linter(
@@ -1029,21 +1023,16 @@ fn lint_rust(
         "cargo shear is required to lint Rust but was not found",
         "cargo install cargo-shear",
     )?;
-    require_linter(
-        cargo_modules::is_available(),
-        "cargo modules is required to lint Rust but was not found",
-        "cargo install cargo-modules",
-    )?;
 
-    // All four phases below are independent: they read the same input
+    // All three phases below are independent: they read the same input
     // slice but never mutate shared state and each spawns its own
-    // subprocess (clippy/shear/modules) or runs a pure in-process AST
+    // subprocess (clippy/shear) or runs a pure in-process AST
     // walk (engine). Running them in parallel is a straightforward win.
     //
-    // Caveat: clippy/shear/modules all shell out to `cargo`, which grabs
+    // Caveat: clippy and shear both shell out to `cargo`, which grabs
     // a file-based lock on `target/`. Under contention they partially
     // serialize on that lock — benchmarks still show a meaningful gain
-    // because cargo-metadata parsing and I/O overlap between the three.
+    // because cargo-metadata parsing and I/O overlap between the two.
     //
     // Each closure measures its own wall-clock via `Instant::now()` and
     // returns `(Result<Vec<Diagnostic>>, Duration)` so the main thread
@@ -1052,18 +1041,11 @@ fn lint_rust(
 
     let clippy_phase = || -> PhaseOut {
         let t = Instant::now();
-        (clippy::lint_files(rs_files, config, coverage.is_partial()), t.elapsed())
+        (clippy::lint_files(rs_files, config, is_partial), t.elapsed())
     };
     let shear_phase = || -> PhaseOut {
         let t = Instant::now();
         (cargo_shear::lint_files(rs_files), t.elapsed())
-    };
-    let modules_phase = || -> PhaseOut {
-        let t = Instant::now();
-        if coverage == cli::Coverage::Staged {
-            return (Ok(Vec::new()), t.elapsed());
-        }
-        (cargo_modules::lint_files(rs_files), t.elapsed())
     };
     let project2 = std::sync::Arc::clone(project);
     let engine_phase = || -> PhaseOut {
@@ -1074,13 +1056,10 @@ fn lint_rust(
         )
     };
 
-    // rayon::join(|| join(a, b), || join(c, d)) fans out into a
-    // balanced binary tree so all four closures execute on rayon's
+    // rayon::join(|| join(a, b), c) runs all three closures on rayon's
     // worker pool in parallel when workers are available.
-    let ((clippy_out, shear_out), (modules_out, engine_out)) = rayon::join(
-        || rayon::join(clippy_phase, shear_phase),
-        || rayon::join(modules_phase, engine_phase),
-    );
+    let ((clippy_out, shear_out), engine_out) =
+        rayon::join(|| rayon::join(clippy_phase, shear_phase), engine_phase);
 
     let mut diagnostics = Vec::new();
 
@@ -1091,10 +1070,6 @@ fn lint_rust(
     let (shear_res, shear_dur) = shear_out;
     timings.cargo_shear = shear_dur;
     diagnostics.extend(shear_res?);
-
-    let (modules_res, modules_dur) = modules_out;
-    timings.cargo_modules = modules_dur;
-    diagnostics.extend(modules_res?);
 
     let (engine_res, engine_dur) = engine_out;
     timings.engine_rs = engine_dur;

@@ -2475,6 +2475,8 @@ pub struct CargoManifest {
     /// `[[example]]`, `[[bench]]`, `[[test]]`), relative to `manifest_dir`.
     /// Each names a standalone executable with its own `fn main()`.
     explicit_target_paths: Vec<PathBuf>,
+    /// `[lib] path`, relative to `manifest_dir`.
+    lib_path: Option<PathBuf>,
     /// An async runtime (`tokio`, `async-std`, `futures`) is declared in any
     /// dependency section.
     async_runtime: bool,
@@ -2575,6 +2577,12 @@ impl CargoManifest {
             .map(PathBuf::from)
             .collect();
 
+        let lib_path = value
+            .get("lib")
+            .and_then(|lib| lib.get("path"))
+            .and_then(toml::Value::as_str)
+            .map(PathBuf::from);
+
         let async_runtime = ["dependencies", "dev-dependencies", "build-dependencies"]
             .iter()
             .filter_map(|section| value.get(section).and_then(toml::Value::as_table))
@@ -2636,6 +2644,7 @@ impl CargoManifest {
             crate_types,
             has_bin_table,
             explicit_target_paths,
+            lib_path,
             async_runtime,
             no_std_category,
             testing_crate,
@@ -2706,6 +2715,17 @@ impl CargoManifest {
         self.explicit_target_paths
             .iter()
             .any(|target| path_segments(target) == relative_segments)
+    }
+
+    /// True when `file_path` is the explicit `path` of any target table, the
+    /// `[lib]` included: Cargo compiles it as a crate root.
+    #[must_use]
+    pub fn declares_target_at(&self, file_path: &Path) -> bool {
+        let relative = file_path.strip_prefix(&self.manifest_dir).unwrap_or(file_path);
+        self.lib_path
+            .as_deref()
+            .is_some_and(|lib| path_segments(lib) == path_segments(relative))
+            || self.declares_executable_at(file_path)
     }
 
     /// True when the crate builds a library target: a `[lib]` table is declared,
