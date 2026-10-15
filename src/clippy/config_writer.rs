@@ -113,8 +113,8 @@ pub fn materialize(config: &Config) -> Result<PathBuf> {
     let body = render_clippy_toml(config)?;
     let mut hasher = rustc_hash::FxHasher::default();
     body.hash(&mut hasher);
-    let dir = std::env::temp_dir()
-        .join("comply-clippy-conf")
+    let dir = user_cache_dir()
+        .join("comply/clippy-conf")
         .join(format!("{:016x}", hasher.finish()));
     let path = dir.join("clippy.toml");
     if path.is_file() {
@@ -129,6 +129,20 @@ pub fn materialize(config: &Config) -> Result<PathBuf> {
     tmp.persist(&path)
         .with_context(|| format!("failed to move clippy.toml into {}", dir.display()))?;
     Ok(dir)
+}
+
+/// A per-user cache, not the temp dir: macOS purges `$TMPDIR` after a few idle
+/// days (one full re-lint each time), and a shared `/tmp` path is predictable
+/// to other users.
+fn user_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        return dir.into();
+    }
+    match std::env::var_os("HOME") {
+        Some(home) if cfg!(target_os = "macos") => Path::new(&home).join("Library/Caches"),
+        Some(home) => Path::new(&home).join(".cache"),
+        None => std::env::temp_dir(),
+    }
 }
 
 /// Cargo expects `CLIPPY_CONF_DIR` to point to a directory containing
