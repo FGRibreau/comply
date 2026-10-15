@@ -240,28 +240,12 @@ fn invoke_clippy_fix(workspace: &Path, packages: &[String], config: &Config) -> 
         "--manifest-path",
     ]);
     cmd.arg(&manifest);
-    let (_clippy_conf_guard, clippy_conf_dir) = crate::clippy::config_writer::materialize(config)?;
+    let clippy_conf_dir = crate::clippy::config_writer::materialize(config)?;
     let (key, val) = crate::clippy::config_writer::env_var_for_dir(&clippy_conf_dir);
     cmd.env(key, val);
     cmd.arg("--");
-
-    // Forward the same per-rule `-W`/`-A` flags the lint mode would,
-    // so a `[rules."clippy::xxx"] enabled = true` knob in comply.toml
-    // also drives the fixer.
     let bindings = crate::rules::collect_clippy_bindings();
-    for (lint, _, _) in &bindings {
-        cmd.arg(format!("-W{lint}"));
-    }
-    for (rule_id, rule) in config.iter_rules() {
-        if rule_id.starts_with("clippy::") {
-            if rule.enabled == Some(true) {
-                cmd.arg(format!("-W{rule_id}"));
-            }
-            if rule.disabled == Some(true) {
-                cmd.arg(format!("-A{rule_id}"));
-            }
-        }
-    }
+    cmd.args(crate::clippy::lint_args(&bindings, config));
 
     let status = cmd
         .status()
