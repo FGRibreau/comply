@@ -1,4 +1,4 @@
-//! copy-apostrophe-style oxc backend for TSX / JS(X).
+//! copy-apostrophe-style oxc backend for TS, TSX and JS(X).
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::rules::backend::{AstType, CheckCtx, OxcCheck};
@@ -9,17 +9,21 @@ pub struct Check;
 
 impl OxcCheck for Check {
     fn interested_kinds(&self) -> &'static [AstType] {
-        &[AstType::JSXText, AstType::JSXAttribute]
+        &[
+            AstType::JSXText,
+            AstType::StringLiteral,
+            AstType::TemplateElement,
+        ]
     }
 
     fn run<'a>(
         &self,
         node: &oxc_semantic::AstNode<'a>,
         ctx: &CheckCtx,
-        _semantic: &'a oxc_semantic::Semantic<'a>,
+        semantic: &'a oxc_semantic::Semantic<'a>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let Some((text, start, _)) = copy_text(&node.kind(), ctx.source) else {
+        let Some((text, start, _, _)) = copy_text(node, semantic, ctx.source) else {
             return;
         };
         let style = ctx.config.string(super::META.id, "style", ctx.lang);
@@ -102,6 +106,20 @@ mod tests {
         assert!(straight.is_empty());
         let typographic = run_oxc_rule_with_toml(&Check, "<p>l’agent</p>", "Page.tsx", toml);
         assert_eq!(typographic.len(), 1);
+    }
+
+    #[test]
+    fn flags_elision_in_ts_strings_templates_and_attributes() {
+        for path in ["Page.ts", "Page.tsx"] {
+            for source in ["const m = \"l'agent répond\";", "const m = `d'abord ${x} ici`;"] {
+                assert_eq!(run_rule(&Check, source, path).len(), 1, "{path}: {source}");
+            }
+        }
+        let attribute = run("<Banner message=\"l'agent est là\" />");
+        assert_eq!(attribute.len(), 1);
+        for source in ["const o = { \"l'x\": 1 };", "const id = \"l'x\";", "<i className=\"l'x\" />"] {
+            assert!(run(source).is_empty(), "{source}");
+        }
     }
 
     #[test]

@@ -466,6 +466,36 @@ fn fix_rewrites_each_copy_finding_in_its_context_issue_8610() {
 }
 
 #[test]
+fn fix_rewrites_copy_in_ts_strings_issue_1478() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    fs::write(
+        root.join("lib.ts"),
+        "export const m = \"Attention : l'agent répond\";\n",
+    )
+    .unwrap();
+
+    common::comply()
+        .arg("--fix")
+        .arg(root)
+        .assert()
+        .stderr(predicate::str::contains(
+            "comply: rewrote 2 copy finding(s)",
+        ));
+    let lib = fs::read_to_string(root.join("lib.ts")).unwrap();
+    assert!(
+        lib.contains("\"Attention\\u00A0: l’agent répond\""),
+        "{lib}"
+    );
+    common::comply().arg(root).assert().stdout(
+        predicate::str::contains("french-nbsp-before-punctuation")
+            .or(predicate::str::contains("copy-apostrophe-style"))
+            .not(),
+    );
+}
+
+#[test]
 fn staged_diff_only_fix_leaves_unchanged_lines_issue_8610() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();

@@ -1,4 +1,4 @@
-//! banned-copy-words oxc backend for TSX / JS(X).
+//! banned-copy-words oxc backend for TS, TSX and JS(X).
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::rules::backend::{AstType, CheckCtx, OxcCheck};
@@ -10,17 +10,21 @@ pub struct Check;
 
 impl OxcCheck for Check {
     fn interested_kinds(&self) -> &'static [AstType] {
-        &[AstType::JSXText, AstType::JSXAttribute]
+        &[
+            AstType::JSXText,
+            AstType::StringLiteral,
+            AstType::TemplateElement,
+        ]
     }
 
     fn run<'a>(
         &self,
         node: &oxc_semantic::AstNode<'a>,
         ctx: &CheckCtx,
-        _semantic: &'a oxc_semantic::Semantic<'a>,
+        semantic: &'a oxc_semantic::Semantic<'a>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let Some((text, start, _)) = copy_text(&node.kind(), ctx.source) else {
+        let Some((text, start, _, _)) = copy_text(node, semantic, ctx.source) else {
             return;
         };
         let config = ctx.config;
@@ -114,6 +118,16 @@ mod tests {
             let diagnostics = run_banning("[\"désolé\"]", source);
             assert_eq!(diagnostics.len(), 1, "{source}");
             assert!(diagnostics[0].message.contains("désolé"), "{source}");
+        }
+    }
+
+    #[test]
+    fn flags_ts_phrases_not_identifiers_or_paths() {
+        let toml = "[rules.banned-copy-words]\nbanned = [\"token\", \"slug\", \"api\"]\nallowed = []\n";
+        let run_ts = |source| run_oxc_rule_with_toml(&Check, source, "Page.ts", toml);
+        assert_eq!(run_ts("const m = \"Votre token expire\";").len(), 1);
+        for source in ["const k = [\"slug\", \"Nom court\"];", "const p = \"/api/x\";"] {
+            assert!(run_ts(source).is_empty(), "{source}");
         }
     }
 

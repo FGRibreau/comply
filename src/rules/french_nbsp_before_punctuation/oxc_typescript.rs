@@ -1,4 +1,4 @@
-//! french-nbsp-before-punctuation oxc backend for TSX / JS(X).
+//! french-nbsp-before-punctuation oxc backend for TS, TSX and JS(X).
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::rules::backend::{AstType, CheckCtx, OxcCheck};
@@ -12,20 +12,24 @@ pub struct Check;
 
 impl OxcCheck for Check {
     fn interested_kinds(&self) -> &'static [AstType] {
-        &[AstType::JSXText, AstType::JSXAttribute]
+        &[
+            AstType::JSXText,
+            AstType::StringLiteral,
+            AstType::TemplateElement,
+        ]
     }
 
     fn run<'a>(
         &self,
         node: &oxc_semantic::AstNode<'a>,
         ctx: &CheckCtx,
-        _semantic: &'a oxc_semantic::Semantic<'a>,
+        semantic: &'a oxc_semantic::Semantic<'a>,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let Some((text, start, escapes)) = copy_text(&node.kind(), ctx.source) else {
+        let Some((text, start, escapes, is_prose)) = copy_text(node, semantic, ctx.source) else {
             return;
         };
-        for (offset, mark) in unspaced_marks(text, escapes) {
+        for (offset, mark) in unspaced_marks(text, escapes, is_prose) {
             let nbsp = if mark == ':' { '\u{a0}' } else { '\u{202f}' };
             diagnostics.push(Diagnostic::at_offset(
                 Arc::clone(&ctx.path_arc),
@@ -43,19 +47,24 @@ impl OxcCheck for Check {
     }
 }
 
-fn unspaced_marks(text: &str, escapes: Escapes) -> impl Iterator<Item = (usize, char)> + '_ {
+fn unspaced_marks(
+    text: &str,
+    escapes: Escapes,
+    is_prose: bool,
+) -> impl Iterator<Item = (usize, char)> + '_ {
     text.char_indices().filter(move |&(offset, mark)| {
-        MARKS.contains(&mark) && lacks_nbsp(text, offset, mark, escapes)
+        MARKS.contains(&mark) && lacks_nbsp(text, offset, mark, escapes, is_prose)
     })
 }
 
 /// True when the mark at `offset` lacks its non-breaking space.
-fn lacks_nbsp(text: &str, offset: usize, mark: char, escapes: Escapes) -> bool {
+fn lacks_nbsp(text: &str, offset: usize, mark: char, escapes: Escapes, is_prose: bool) -> bool {
     let before = &text[..offset];
     let Some(previous) = before.chars().next_back() else {
         return false;
     };
-    let is_glued = previous.is_alphabetic() || CLOSING.contains(&previous);
+    // A glued mark in a bare string is CSS or code (`foo!`, `email:`).
+    let is_glued = is_prose && (previous.is_alphabetic() || CLOSING.contains(&previous));
     if !is_glued && previous != ' ' {
         return false;
     }
@@ -145,12 +154,29 @@ mod tests {
     fn ignores_entity_semicolons_and_non_copy() {
         for source in [
             "<p>caf&eacute; ok</p>",
-            "<i className=\"a : b\" />",
-            "<input value=\"Prêt ?\" />",
-            "const s = \"Prêt ?\";",
+            "<i className=\"Prêt?\" />",
+            "<input value=\"Prêt?\" />",
+            "const s = \"Prêt?\";",
             "<p>{/* Prêt ? */}</p>",
         ] {
             assert!(run(source).is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn flags_ts_phrases_not_urls_nor_developer_errors() {
+        let colon = crate::rules::test_helpers::run_rule(&Check, "const m = \"Attention : ok\";", "Page.ts");
+        assert_eq!(colon.len(), 1);
+        assert!(colon[0].message.contains("\\u00A0"));
+        for source in [
+            "const link = \"mailto:\";",
+            "throw new Error(`Invalid runtime configuration: ${x}`);",
+            "console.warn(\"retry: later\");",
+            "const q = `(max-width: ${w}px)`;",
+            "const c = \"gap-2 text-foreground!\";",
+        ] {
+            let diagnostics = crate::rules::test_helpers::run_rule(&Check, source, "Page.ts");
+            assert!(diagnostics.is_empty(), "{source}");
         }
     }
 
