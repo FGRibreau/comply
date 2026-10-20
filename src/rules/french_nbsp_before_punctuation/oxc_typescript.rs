@@ -110,9 +110,10 @@ impl crate::rules::test_helpers::RunRule for Check {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::test_helpers::run_rule;
 
     fn run(source: &str) -> Vec<Diagnostic> {
-        crate::rules::test_helpers::run_rule(&Check, source, "Page.tsx")
+        run_rule(&Check, source, "Page.tsx")
     }
 
     #[test]
@@ -165,7 +166,7 @@ mod tests {
 
     #[test]
     fn flags_ts_phrases_not_urls_nor_developer_errors() {
-        let colon = crate::rules::test_helpers::run_rule(&Check, "const m = \"Attention : ok\";", "Page.ts");
+        let colon = run_rule(&Check, "const m = \"Attention : ok\";", "Page.ts");
         assert_eq!(colon.len(), 1);
         assert!(colon[0].message.contains("\\u00A0"));
         for source in [
@@ -175,7 +176,7 @@ mod tests {
             "const q = `(max-width: ${w}px)`;",
             "const c = \"gap-2 text-foreground!\";",
         ] {
-            let diagnostics = crate::rules::test_helpers::run_rule(&Check, source, "Page.ts");
+            let diagnostics = run_rule(&Check, source, "Page.ts");
             assert!(diagnostics.is_empty(), "{source}");
         }
     }
