@@ -10,11 +10,13 @@ use crate::rules::meta::RuleMeta;
 
 pub const META: RuleMeta = RuleMeta {
     id: "ci-no-plaintext-secrets",
-    description: "Workflow `env:`/`with:` values whose key mentions password, token, \
-                  secret, or api_key must not be literal strings — they leak into logs, \
-                  forks and git history.",
+    description: "CI workflow values (`.github/workflows/*.yml`, `.gitlab-ci.yml`, \
+                  `*.gitlab-ci.yml`) whose key mentions password, token, secret, or \
+                  api_key must not be literal strings — they leak into logs, forks and \
+                  git history. Other YAML files are not judged.",
     remediation: "Reference the value via `${{ secrets.<NAME> }}` from repository or \
-                  environment secrets.",
+                  environment secrets (GitHub), or move it to a masked CI/CD variable \
+                  (GitLab).",
     severity: Severity::Error,
     doc_url: None,
     categories: &["ci-cd"],
