@@ -261,6 +261,11 @@ impl Check {
         {
             return;
         }
+        // A bundler-plugin alias names a file under the package root.
+        // Example: `@assets/x.png` resolves to `<root>/assets/x.png`.
+        if ctx.project.resolves_via_scope_directory(ctx.path, spec) {
+            return;
+        }
         // Jest `modulePaths`/`moduleDirectories` add in-repo resolution roots, so
         // a bare specifier whose first segments resolve to local source under one
         // of those roots (e.g. `app/core/foo` → `<rootDir>/public/app/core/foo`)
@@ -774,6 +779,39 @@ export function NuxtVitestEnvironmentOptionsPlugin(options = {}): Plugin {
         fs::write(&file, source).unwrap();
         let diags = run_oxc_in_project(&file, source);
         assert!(diags.is_empty(), "`~/` path alias must not be flagged, got {diags:?}");
+    }
+
+    // Frameworks alias `@name/…` in their own bundler plugin.
+    // The open-slide plugin maps `@assets/…` to `<root>/assets/…`.
+    // The file exists under the package root: a local import.
+    #[test]
+    fn allows_scope_alias_resolving_under_package_root() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("package.json"), r#"{"name":"deck","dependencies":{}}"#).unwrap();
+        let illustrations = dir.path().join("assets").join("illustrations");
+        fs::create_dir_all(&illustrations).unwrap();
+        fs::write(illustrations.join("escalier.png"), b"png").unwrap();
+        let slide = dir.path().join("slides").join("intro");
+        fs::create_dir_all(&slide).unwrap();
+        let file = slide.join("index.tsx");
+        let source = "import escalier from '@assets/illustrations/escalier.png';";
+        fs::write(&file, source).unwrap();
+        let diags = run_oxc_in_project(&file, source);
+        assert!(diags.is_empty(), "`@assets/` file under the package root must not be flagged, got {diags:?}");
+    }
+
+    // Negative space: no matching file under the package root.
+    // The import stays an unlisted scoped package.
+    #[test]
+    fn still_flags_scoped_import_absent_from_package_root() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("package.json"), r#"{"name":"deck","dependencies":{}}"#).unwrap();
+        fs::create_dir_all(dir.path().join("assets")).unwrap();
+        let file = dir.path().join("index.tsx");
+        let source = "import missing from '@assets/missing.png';";
+        fs::write(&file, source).unwrap();
+        let diags = run_oxc_in_project(&file, source);
+        assert_eq!(diags.len(), 1, "unresolved `@assets/` import must still fire: {diags:?}");
     }
 
     // Regression #1376: `@/` path alias (WXT/Vite framework default) used

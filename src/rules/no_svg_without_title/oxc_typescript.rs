@@ -2,7 +2,7 @@
 //!
 //! Ports Biome's `noSvgWithoutTitle`. An `<svg>` must expose an accessible
 //! name. It is accepted when any of these holds:
-//! - it has `aria-hidden="true"`;
+//! - it has `aria-hidden` set to true (`"true"`, `{true}`, or valueless);
 //! - its first element child is a non-empty `<title>`;
 //! - its resolved ARIA role does not require a name (e.g. `role="presentation"`);
 //! - its role requires a name and it carries `aria-label`, or an
@@ -12,7 +12,7 @@
 //! which requires a name; so a bare `<svg>` without a title fires.
 
 use crate::diagnostic::{Diagnostic, Severity};
-use crate::oxc_helpers::byte_offset_to_line_col;
+use crate::oxc_helpers::{byte_offset_to_line_col, jsx_opening_element_is_aria_hidden};
 use crate::rules::backend::{AstKind, AstType, CheckCtx, OxcCheck};
 use oxc_ast::ast::{
     JSXAttributeItem, JSXAttributeName, JSXAttributeValue, JSXChild, JSXElement,
@@ -74,10 +74,7 @@ impl OxcCheck for Check {
             return;
         }
 
-        // aria-hidden="true" → decorative, no name needed.
-        if let Some(value) = static_attr_value(opening, "aria-hidden")
-            && value == "true"
-        {
+        if jsx_opening_element_is_aria_hidden(opening) {
             return;
         }
 
@@ -297,6 +294,23 @@ mod tests {
         assert!(
             run_on(r#"const x = <svg aria-hidden="true"><defs><pattern><path d="M.5 200V.5H200" fill="none" /></pattern></defs></svg>;"#).is_empty()
         );
+    }
+
+    // JSX reads a valueless attribute as `true`.
+    // So a bare `aria-hidden` marks the SVG decorative.
+    #[test]
+    fn valueless_aria_hidden_decorative() {
+        assert!(run_on(r#"const x = <svg width={120} aria-hidden><line x1={0} /></svg>;"#).is_empty());
+    }
+
+    #[test]
+    fn aria_hidden_true_expression_decorative() {
+        assert!(run_on("const x = <svg aria-hidden={true}><line x1={0} /></svg>;").is_empty());
+    }
+
+    #[test]
+    fn aria_hidden_false_expression_still_needs_name() {
+        assert_eq!(run_on("const x = <svg aria-hidden={false}><line x1={0} /></svg>;").len(), 1);
     }
 
     #[test]

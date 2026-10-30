@@ -1,7 +1,8 @@
 //! OxcCheck backend for ui-no-wide-letter-spacing.
 //!
 //! Flags inline `letterSpacing` string values in `em` above 0.05 inside
-//! JSX `style` attributes.
+//! JSX `style` attributes, unless the same style sets
+//! `textTransform: 'uppercase'`.
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::oxc_helpers::byte_offset_to_line_col;
@@ -17,6 +18,23 @@ fn parse_em(raw: &str) -> Option<f64> {
         return None;
     }
     stripped.trim().parse::<f64>().ok()
+}
+
+/// True when the style object sets `textTransform: 'uppercase'`.
+fn is_uppercase_style(style: &oxc_ast::ast::ObjectExpression) -> bool {
+    use oxc_ast::ast::{Expression, ObjectPropertyKind, PropertyKey};
+    style.properties.iter().any(|prop| {
+        let ObjectPropertyKind::ObjectProperty(pair) = prop else {
+            return false;
+        };
+        let key = match &pair.key {
+            PropertyKey::StaticIdentifier(id) => id.name.as_str(),
+            PropertyKey::StringLiteral(s) => s.value.as_str(),
+            _ => return false,
+        };
+        key == "textTransform"
+            && matches!(&pair.value, Expression::StringLiteral(val) if val.value == "uppercase")
+    })
 }
 
 impl OxcCheck for Check {
@@ -62,6 +80,10 @@ impl OxcCheck for Check {
             else {
                 continue;
             };
+            // Wide tracking is the remediation's own advice for uppercase labels.
+            if is_uppercase_style(obj) {
+                continue;
+            }
 
             for prop in &obj.properties {
                 let ObjectPropertyKind::ObjectProperty(pair) = prop else {
@@ -161,5 +183,19 @@ mod tests {
     #[test]
     fn allows_non_style_object() {
         assert!(run(r#"const config = { letterSpacing: '0.2em' };"#).is_empty());
+    }
+
+    // The remediation reserves wide tracking for uppercase labels.
+    // An uppercase eyebrow is that exact case.
+    #[test]
+    fn allows_wide_tracking_on_uppercase_label() {
+        let src = r#"<div style={{ fontSize: 26, letterSpacing: '0.22em', textTransform: 'uppercase' }} />"#;
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn flags_wide_tracking_on_mixed_case_text() {
+        let src = r#"<span style={{ letterSpacing: '0.14em', textTransform: 'capitalize' }} />"#;
+        assert_eq!(run(src).len(), 1);
     }
 }

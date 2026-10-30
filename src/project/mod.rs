@@ -5993,6 +5993,27 @@ impl ProjectCtx {
         is_gated
     }
 
+    /// True if a scoped-looking `spec` (`@assets/logo.png`) names an existing
+    /// file under the same-named directory of the package root
+    /// (`<package_dir>/assets/logo.png`). Frameworks register such aliases in
+    /// their own bundler plugin (open-slide maps `@assets` to `<root>/assets`),
+    /// out of reach of tsconfig `paths`. An npm package installs under
+    /// `node_modules/@scope/`, never `<root>/scope/`, so a file found there is
+    /// a project file. Returns `false` when the candidate does not exist, so an
+    /// unlisted scoped package still fires.
+    pub fn resolves_via_scope_directory(&self, importer: &Path, spec: &str) -> bool {
+        let Some((scope, rest)) = spec.strip_prefix('@').and_then(|s| s.split_once('/')) else {
+            return false;
+        };
+        if scope.is_empty() || rest.is_empty() {
+            return false;
+        }
+        let Some(package_dir) = self.nearest_package_json_dir(importer) else {
+            return false;
+        };
+        local_source_exists(&package_dir.join(scope).join(rest))
+    }
+
     /// True if a non-relative `spec` resolves to a local source file via the
     /// nearest tsconfig's `baseUrl` (e.g. `baseUrl: "."` turns `src/types/Foo`
     /// into `<tsconfig_dir>/src/types/Foo.ts`). Such imports are project files,
