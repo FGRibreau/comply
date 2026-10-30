@@ -896,6 +896,8 @@ fn fix_rewrites_a_test_that_requires_a_feature() {
 
     let fixed = fs::read_to_string(dir.path().join("tests/it.rs")).unwrap();
     assert!(fixed.contains("is_empty()"), "{fixed}");
+}
+
 #[test]
 fn a_javascript_only_set_is_not_refused_for_a_missing_tsconfig() {
     // JavaScript carries no type annotations.
