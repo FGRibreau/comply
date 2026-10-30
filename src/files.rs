@@ -22,9 +22,9 @@ use std::process::Command;
 
 use crate::cli::ScanMode;
 
-const TS_EXTENSIONS: &[&str] = &["ts", "mts"];
+const TS_EXTENSIONS: &[&str] = &["ts", "mts", "cts"];
 const TSX_EXTENSIONS: &[&str] = &["tsx", "jsx"];
-const JS_EXTENSIONS: &[&str] = &["js", "mjs"];
+const JS_EXTENSIONS: &[&str] = &["js", "mjs", "cjs"];
 const RUST_EXTENSIONS: &[&str] = &["rs"];
 const VUE_EXTENSIONS: &[&str] = &["vue"];
 const TOML_EXTENSIONS: &[&str] = &["toml"];
@@ -49,12 +49,12 @@ pub struct SourceFile {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
-    /// Plain `.ts` / `.mts`.
+    /// Plain `.ts` / `.mts` / `.cts`.
     TypeScript,
     /// `.tsx` / `.jsx` — needs the JSX-aware grammar.
     Tsx,
-    /// Plain JavaScript `.js` / `.mjs` — handled by the TypeScript grammar
-    /// since it's a strict superset.
+    /// Plain JavaScript `.js` / `.mjs` / `.cjs`.
+    /// The TypeScript grammar handles it, being a strict superset.
     JavaScript,
     /// Rust source `.rs`.
     Rust,
@@ -576,33 +576,43 @@ mod tests {
 
     #[test]
     fn classify_routes_extension_to_language() {
-        for ext in ["ts", "mts"] {
-            assert_eq!(lang_for(ext), Language::TypeScript);
+        for ext in ["ts", "mts", "cts"] {
+            assert_eq!(lang_for(ext), Language::TypeScript, "{ext}");
         }
         for ext in ["tsx", "jsx"] {
             assert_eq!(lang_for(ext), Language::Tsx, "{ext} → TSX grammar");
         }
-        for ext in ["js", "mjs"] {
-            assert_eq!(lang_for(ext), Language::JavaScript);
+        for ext in ["js", "mjs", "cjs"] {
+            assert_eq!(lang_for(ext), Language::JavaScript, "{ext}");
         }
         assert_eq!(lang_for("rs"), Language::Rust);
     }
 
     #[test]
     fn javascript_source_covers_jsx_but_no_typescript_extension() {
-        for ext in ["js", "mjs", "jsx"] {
+        for ext in ["js", "mjs", "cjs", "jsx"] {
             assert!(
                 is_javascript_source(&PathBuf::from(format!("foo.{ext}"))),
                 "{ext} is JavaScript"
             );
         }
-        for ext in ["ts", "mts", "tsx"] {
+        for ext in ["ts", "mts", "cts", "tsx"] {
             assert!(
                 !is_javascript_source(&PathBuf::from(format!("foo.{ext}"))),
                 "{ext} is TypeScript"
             );
         }
         assert!(!is_javascript_source(&PathBuf::from("Makefile")));
+    }
+
+    /// `from_path` (LSP) and `classify` (scan) agree on every script extension.
+    /// CommonJS ones included.
+    #[test]
+    fn from_path_matches_classify_for_every_script_extension() {
+        for ext in ["ts", "mts", "cts", "tsx", "js", "mjs", "cjs", "jsx"] {
+            let path = PathBuf::from(format!("foo.{ext}"));
+            assert_eq!(Language::from_path(&path), Some(lang_for(ext)), "{ext}");
+        }
     }
 
     #[test]

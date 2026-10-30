@@ -1110,7 +1110,7 @@ pub fn is_worker_script<'a>(source: &str, semantic: &'a Semantic<'a>) -> bool {
 /// TypeScript syntax).
 pub fn source_type_for_path(path: &Path) -> SourceType {
     match path.extension().and_then(|e| e.to_str()) {
-        Some("ts") => SourceType::ts(),
+        Some("ts" | "mts" | "cts") => SourceType::ts(),
         Some("tsx") => SourceType::tsx(),
         Some("mjs") => SourceType::mjs(),
         Some("cjs") => SourceType::cjs(),
