@@ -27,6 +27,17 @@ pub fn without_type_aware_rules(dir: &Path) {
     fs::write(dir.join("comply.toml"), WITHOUT_TYPE_AWARE).expect("failed to write comply.toml");
 }
 
+/// Write a comply.toml of `own_config` plus that same opt-out.
+/// A fixture with its own rules must keep the opt-out.
+/// Overwriting the file `without_type_aware_rules` wrote would drop it.
+pub fn config_without_type_aware_rules(dir: &Path, own_config: &str) {
+    fs::write(
+        dir.join("comply.toml"),
+        format!("{own_config}\n{WITHOUT_TYPE_AWARE}"),
+    )
+    .expect("failed to write comply.toml");
+}
+
 /// Write a TS file in a temp dir and return the dir + path.
 /// The TempDir must be held by the caller — its Drop deletes the directory.
 pub fn write_ts_file(name: &str, content: &str) -> (TempDir, PathBuf) {

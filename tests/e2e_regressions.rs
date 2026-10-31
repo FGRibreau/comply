@@ -188,6 +188,7 @@ fn migration_lock_timeout_ignores_framework_package_dirs() {
 #[test]
 fn sql_migration_rules_skip_test_dirs_and_host_code() {
     let dir = TempDir::new().expect("failed to create temp dir");
+    common::without_type_aware_rules(dir.path());
     let both_defects = "ALTER TABLE t ADD CONSTRAINT t_a_chk CHECK (a > 0) NOT VALID;\n\
                         ALTER TABLE t VALIDATE CONSTRAINT t_a_chk;\n\
                         UPDATE t SET a = replace(a, 'x', 'y') WHERE id = 1;\n";
@@ -423,7 +424,7 @@ const COPY_RULES_TOML: &str = "[rules.french-nbsp-before-punctuation]\ndisabled 
 fn fix_rewrites_each_copy_finding_in_its_context_issue_8610() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    common::config_without_type_aware_rules(root, COPY_RULES_TOML);
     fs::write(
         root.join("Page.tsx"),
         "export function Page() { return <p aria-label=\"Quoi ?\">\
@@ -471,7 +472,7 @@ fn fix_rewrites_each_copy_finding_in_its_context_issue_8610() {
 fn fix_rewrites_copy_in_ts_strings_issue_1478() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    common::config_without_type_aware_rules(root, COPY_RULES_TOML);
     fs::write(
         root.join("lib.ts"),
         "export const m = \"Attention : l'agent répond\";\n",
@@ -505,7 +506,7 @@ fn staged_diff_only_fix_leaves_unchanged_lines_issue_8610() {
     git(root, &["config", "user.email", "t@example.com"]);
     git(root, &["config", "user.name", "t"]);
     fs::create_dir(root.join("web")).unwrap();
-    fs::write(root.join("comply.toml"), COPY_RULES_TOML).unwrap();
+    common::config_without_type_aware_rules(root, COPY_RULES_TOML);
     fs::write(
         root.join("web/Page.tsx"),
         "export const A = <p>Avant : ok</p>;\n",
@@ -537,6 +538,7 @@ fn staged_diff_only_fix_leaves_unchanged_lines_issue_8610() {
 fn fix_leaves_raw_literal_invisible_reported_issue_8610() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
+    common::without_type_aware_rules(root);
     let rs = "pub const S: &str = r\"a\u{200b}b\";\n";
     let ts = "export const t = String.raw`a\u{200b}b`;\n";
     fs::write(root.join("lib.rs"), rs).unwrap();
@@ -555,6 +557,7 @@ fn fix_leaves_raw_literal_invisible_reported_issue_8610() {
 fn fix_still_runs_oxlint_fixers_issue_8610() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
+    common::without_type_aware_rules(root);
     fs::write(
         root.join("a.ts"),
         "export function f() { debugger; return 1; }\n",
@@ -574,11 +577,10 @@ fn fix_still_runs_oxlint_fixers_issue_8610() {
 fn fix_leaves_file_whose_fix_breaks_parse_issue_8610() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-    fs::write(
-        root.join("comply.toml"),
+    common::config_without_type_aware_rules(
+        root,
         "[rules.copy-apostrophe-style]\ndisabled = false\nstyle = \"straight\"\n",
-    )
-    .unwrap();
+    );
     let tsx = "export const P = () => <i title='l’agent' />;\n";
     fs::write(root.join("Page.tsx"), tsx).unwrap();
 
@@ -639,6 +641,7 @@ fn repo_with_committed_original_8611() -> TempDir {
     git(root, &["init", "-q"]);
     git(root, &["config", "user.email", "t@example.com"]);
     git(root, &["config", "user.name", "t"]);
+    common::without_type_aware_rules(root);
     fs::write(root.join("a.ts"), duplicated_module_8611()).unwrap();
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "init"]);
@@ -689,6 +692,7 @@ fn two_staged_copies_are_reported_once_on_the_last_path_issue_8611() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     git(root, &["init", "-q"]);
+    common::without_type_aware_rules(root);
     fs::write(root.join("a.ts"), duplicated_module_8611()).unwrap();
     fs::write(root.join("b.ts"), duplicated_module_8611()).unwrap();
     git(root, &["add", "a.ts", "b.ts"]);
