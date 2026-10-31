@@ -23,19 +23,24 @@
 //!    It misses code a derive emits, like `::strum::ParseError`.
 //!    It misses code `include!` loads from `OUT_DIR`, like `include_proto!`.
 //!    rustc judges after expansion, through clippy's run.
+//!    `cargo metadata` gives each key the extern name rustc reports.
 //!
 //! Workspaces are de-duplicated so we don't shell out twice for the same
 //! manifest when many `.rs` files share a parent crate.
 
-use rustc_hash::FxHashSet;
 use anyhow::{Context, Result};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use std::fs;
-use std::path::Path;
-use std::process::Command;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
+use std::time::Duration;
+use wait_timeout::ChildExt;
 
-use crate::clippy::{ExternUsage, PackageExterns};
+use crate::clippy::{ExternUsage, PackageExterns, canonicalize_or_self};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::files::SourceFile;
 use crate::runner_helpers;
@@ -128,105 +133,144 @@ fn dependency_key(message: &str) -> Option<&str> {
 
 /// Drop each finding whose dependency rustc proves used.
 /// Every other diagnostic passes through untouched.
+/// `cargo metadata` runs once per workspace with a finding.
 pub fn drop_proven_used(diagnostics: Vec<Diagnostic>, usage: &ExternUsage) -> Vec<Diagnostic> {
+    let mut workspaces: FxHashMap<PathBuf, Option<Metadata>> = FxHashMap::default();
     diagnostics
         .into_iter()
         .filter(|diag| {
-            let proven = diag.rule_id == RULE_ID
-                && dependency_key(&diag.message)
-                    .is_some_and(|key| rustc_proves_used(&diag.path, key, usage));
+            if diag.rule_id != RULE_ID {
+                return true;
+            }
+            let key = dependency_key(&diag.message);
+            let root = runner_helpers::find_cargo_workspace_root(&diag.path);
+            let (Some(key), Some(root)) = (key, root) else {
+                return true;
+            };
+            let metadata = workspaces
+                .entry(root)
+                .or_insert_with_key(|root| read_metadata(root));
+            let proven = metadata
+                .as_ref()
+                .and_then(|metadata| plain_extern(metadata, &diag.path, key))
+                .is_some_and(|name| {
+                    usage
+                        .package(&diag.path)
+                        .is_some_and(|package| rustc_kept(package, &name))
+                });
             !proven
         })
         .collect()
 }
 
-/// Dependency tables other than plain `[dependencies]`.
-/// Cargo still accepts the underscore spellings.
-const OTHER_DEPENDENCY_TABLES: &[&str] = &[
-    "dev-dependencies",
-    "dev_dependencies",
-    "build-dependencies",
-    "build_dependencies",
-];
+/// How long `cargo metadata` may run.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Whether rustc proves `key` used by `manifest`'s package.
-/// Proof: a compiled target where rustc kept the extern.
-/// Other dependency tables keep cargo-shear's verdict.
-fn rustc_proves_used(manifest: &Path, key: &str, usage: &ExternUsage) -> bool {
-    let Some(toml) = fs::read_to_string(manifest)
-        .ok()
-        .and_then(|content| content.parse::<toml::Value>().ok())
-    else {
-        return false;
-    };
-    let Some(package) = usage.package(manifest) else {
-        return false;
-    };
-    is_plain_dependency(&toml, key) && proves_used(package, &declared_externs(&toml), key)
-}
+/// The most `cargo metadata` output comply reads, in bytes.
+/// A larger workspace keeps cargo-shear's verdicts.
+const METADATA_OUTPUT_CAP: u64 = 64 * 1024 * 1024;
 
-/// rustc's half of the proof, once the manifest is read.
-/// An undeclared extern name means a renamed library.
-/// rustc's silence then proves nothing.
-fn proves_used(package: &PackageExterns, declared: &FxHashSet<String>, key: &str) -> bool {
-    let all_named = package
-        .unused
-        .values()
-        .flatten()
-        .all(|name| declared.contains(name) || package.own_libraries.contains(name));
-    if package.unreadable || !all_named {
-        return false;
+/// The workspace as `cargo metadata` resolves it.
+/// `None` when cargo fails, overruns its deadline or its cap.
+/// `--locked` leaves `Cargo.lock` untouched.
+fn read_metadata(workspace: &Path) -> Option<Metadata> {
+    let mut child = Command::new("cargo")
+        .args(["metadata", "--format-version=1", "--locked"])
+        .current_dir(workspace)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let Some(stdout) = child.stdout.take() else {
+        return give_up(child);
+    };
+    // The output exceeds a pipe buffer.
+    // Unread, it would block cargo until the deadline.
+    let reader = std::thread::spawn(move || {
+        let mut raw = Vec::new();
+        stdout
+            .take(METADATA_OUTPUT_CAP + 1)
+            .read_to_end(&mut raw)
+            .map(|_| raw)
+    });
+    let Ok(Some(status)) = child.wait_timeout(METADATA_TIMEOUT) else {
+        return give_up(child);
+    };
+    let raw = reader.join().ok()?.ok()?;
+    let fits = u64::try_from(raw.len()).is_ok_and(|len| len <= METADATA_OUTPUT_CAP);
+    if !status.success() || !fits {
+        return None;
     }
-    let name = key.replace('-', "_");
-    package.compiled.iter().any(|target| {
-        !package
-            .unused
-            .get(target)
-            .is_some_and(|unused| unused.contains(&name))
-    })
+    serde_json::from_slice(&raw).ok()
 }
 
-/// `key` sits in `[dependencies]` and in no other dependency table.
-/// Only those reach every non-build target.
-fn is_plain_dependency(toml: &toml::Value, key: &str) -> bool {
-    let in_table = |table: Option<&toml::Value>| {
-        table
-            .and_then(toml::Value::as_table)
-            .is_some_and(|deps| deps.contains_key(key))
-    };
-    let elsewhere = OTHER_DEPENDENCY_TABLES
+/// Stop a `cargo metadata` that outstayed its deadline.
+/// A failed kill or wait means it already exited.
+fn give_up(mut child: Child) -> Option<Metadata> {
+    child.kill().ok();
+    child.wait().ok();
+    None
+}
+
+/// The extern name rustc gives `key` in `manifest`'s package.
+/// `None` unless `key` is a plain dependency, unambiguously named.
+fn plain_extern(metadata: &Metadata, manifest: &Path, key: &str) -> Option<String> {
+    let manifest = canonicalize_or_self(manifest);
+    let package = metadata
+        .packages
         .iter()
-        .any(|name| in_table(toml.get(*name)))
-        || platform_tables(toml).any(|platform| {
-            platform
-                .values()
-                .any(|table| table.as_table().is_some_and(|deps| deps.contains_key(key)))
-        });
-    in_table(toml.get("dependencies")) && !elsewhere
-}
-
-/// The `[target.'cfg(…)']` tables of a manifest.
-fn platform_tables(
-    toml: &toml::Value,
-) -> impl Iterator<Item = &toml::map::Map<String, toml::Value>> {
-    toml.get("target")
-        .and_then(toml::Value::as_table)
-        .into_iter()
-        .flat_map(|targets| targets.values().filter_map(toml::Value::as_table))
-}
-
-/// The extern name of every key in every dependency table.
-fn declared_externs(toml: &toml::Value) -> FxHashSet<String> {
-    let top = ["dependencies"]
+        .find(|package| canonicalize_or_self(&package.manifest_path) == manifest)?;
+    let entries: Vec<&MetadataDependency> = package
+        .dependencies
         .iter()
-        .chain(OTHER_DEPENDENCY_TABLES)
-        .filter_map(|name| toml.get(*name));
-    let platform = platform_tables(toml).flat_map(|platform| platform.values());
-    top.chain(platform)
-        .filter_map(toml::Value::as_table)
-        .flat_map(|deps| deps.keys())
-        .map(|key| key.replace('-', "_"))
-        .collect()
+        .filter(|dep| dep.rename.as_deref().unwrap_or(&dep.name) == key)
+        .collect();
+    let first = entries.first()?;
+    // A dev, build or platform entry misses some targets.
+    // Their silence would then prove nothing.
+    if entries
+        .iter()
+        .any(|dep| dep.kind.is_some() || dep.target.is_some() || dep.optional)
+    {
+        return None;
+    }
+    if let Some(rename) = &first.rename {
+        return Some(rename.replace('-', "_"));
+    }
+    // Unrenamed, rustc uses the library's own name.
+    // `async-stripe-billing` builds `stripe_billing`, for one.
+    let names: FxHashMap<&str, &str> = metadata
+        .packages
+        .iter()
+        .map(|package| (package.id.as_str(), package.name.as_str()))
+        .collect();
+    let node = metadata
+        .resolve
+        .as_ref()?
+        .nodes
+        .iter()
+        .find(|node| node.id == package.id)?;
+    let mut externs = node
+        .deps
+        .iter()
+        .filter(|dep| names.get(dep.pkg.as_str()) == Some(&first.name.as_str()))
+        .map(|dep| dep.name.as_str());
+    let name = externs.next()?;
+    // Two names for one package leave the proof ambiguous.
+    externs.all(|other| other == name).then(|| name.to_owned())
+}
+
+/// Whether one compiled target kept the extern `name`.
+/// An unreadable unused-extern warning proves nothing.
+fn rustc_kept(package: &PackageExterns, name: &str) -> bool {
+    !package.unreadable
+        && package.compiled.iter().any(|target| {
+            !package
+                .unused
+                .get(target)
+                .is_some_and(|unused| unused.contains(name))
+        })
 }
 
 /// Convert each shear finding into a comply Diagnostic. We only emit
@@ -316,6 +360,75 @@ struct Location {
     length: usize,
 }
 
+/// What comply reads of `cargo metadata --format-version=1`.
+#[derive(Debug, Deserialize)]
+struct Metadata {
+    packages: Vec<MetadataPackage>,
+    /// Absent under `--no-deps`.
+    #[serde(default)]
+    resolve: Option<MetadataResolve>,
+    #[serde(default, flatten)]
+    _extra: IgnoredAny,
+}
+
+/// One package of the metadata.
+#[derive(Debug, Deserialize)]
+struct MetadataPackage {
+    id: String,
+    name: String,
+    manifest_path: PathBuf,
+    dependencies: Vec<MetadataDependency>,
+    #[serde(default, flatten)]
+    _extra: IgnoredAny,
+}
+
+/// One manifest entry, after workspace inheritance.
+#[derive(Debug, Deserialize)]
+struct MetadataDependency {
+    /// The package name, not the key.
+    name: String,
+    /// The key, when it differs from the package name.
+    #[serde(default)]
+    rename: Option<String>,
+    /// `None` for `[dependencies]`, else `dev` or `build`.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The `cfg(…)` of a platform-specific entry.
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default)]
+    optional: bool,
+    #[serde(default, flatten)]
+    _extra: IgnoredAny,
+}
+
+/// The resolved dependency graph.
+#[derive(Debug, Deserialize)]
+struct MetadataResolve {
+    nodes: Vec<MetadataNode>,
+    #[serde(default, flatten)]
+    _extra: IgnoredAny,
+}
+
+/// One package's resolved edges.
+#[derive(Debug, Deserialize)]
+struct MetadataNode {
+    id: String,
+    deps: Vec<MetadataEdge>,
+    #[serde(default, flatten)]
+    _extra: IgnoredAny,
+}
+
+/// One resolved edge.
+#[derive(Debug, Deserialize)]
+struct MetadataEdge {
+    /// The extern name rustc sees.
+    name: String,
+    pkg: String,
+    #[serde(default, flatten)]
+    _extra: IgnoredAny,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,8 +448,60 @@ mod tests {
         assert!(report.findings.is_empty());
     }
 
-    fn manifest(text: &str) -> toml::Value {
-        text.parse().unwrap()
+    /// Metadata for package `app`, with the given entries and edges.
+    fn app_metadata(dependencies: &str, edges: &str, packages: &str) -> Metadata {
+        serde_json::from_str(&format!(
+            r#"{{"packages":[{{"id":"app","name":"app","manifest_path":"/ws/app/Cargo.toml","dependencies":[{dependencies}]}}{packages}],
+               "resolve":{{"nodes":[{{"id":"app","deps":[{edges}]}}]}}}}"#
+        ))
+        .unwrap()
+    }
+
+    /// A package `name` with id `id` and no dependencies.
+    fn package(id: &str, name: &str) -> String {
+        format!(r#",{{"id":"{id}","name":"{name}","manifest_path":"/reg/{id}","dependencies":[]}}"#)
+    }
+
+    #[test]
+    fn plain_extern_names_the_library_rustc_reports() {
+        let metadata = app_metadata(
+            r#"{"name":"async-stripe-billing"},{"name":"wire-codec","rename":"wire-renamed"}"#,
+            r#"{"name":"stripe_billing","pkg":"billing"},{"name":"wire_renamed","pkg":"wire"}"#,
+            &(package("billing", "async-stripe-billing") + &package("wire", "wire-codec")),
+        );
+        let manifest = Path::new("/ws/app/Cargo.toml");
+        assert_eq!(
+            plain_extern(&metadata, manifest, "async-stripe-billing").as_deref(),
+            Some("stripe_billing")
+        );
+        assert_eq!(
+            plain_extern(&metadata, manifest, "wire-renamed").as_deref(),
+            Some("wire_renamed")
+        );
+        assert_eq!(plain_extern(&metadata, manifest, "wire-codec"), None);
+        assert_eq!(
+            plain_extern(&metadata, Path::new("/ws/other/Cargo.toml"), "wire-renamed"),
+            None
+        );
+    }
+
+    #[test]
+    fn only_a_plain_unambiguous_dependency_has_an_extern() {
+        let metadata = app_metadata(
+            r#"{"name":"both"},{"name":"both","kind":"dev"},{"name":"build","kind":"build"},
+               {"name":"unix","target":"cfg(unix)"},{"name":"opt","optional":true},
+               {"name":"twice"},{"name":"twice","rename":"twice-v2"}"#,
+            r#"{"name":"twice","pkg":"t1"},{"name":"twice_v2","pkg":"t2"}"#,
+            &(package("t1", "twice") + &package("t2", "twice")),
+        );
+        // A target without the extern stays silent: no proof.
+        for key in ["both", "build", "unix", "opt", "twice", "absent"] {
+            assert_eq!(
+                plain_extern(&metadata, Path::new("/ws/app/Cargo.toml"), key),
+                None,
+                "{key}"
+            );
+        }
     }
 
     /// One compiled `lib` target, with the externs rustc found unused.
@@ -344,7 +509,6 @@ mod tests {
         let lib = (vec!["lib".to_owned()], "app".to_owned());
         let mut package = PackageExterns::default();
         package.compiled.insert(lib.clone());
-        package.own_libraries.insert("app".to_owned());
         package
             .unused
             .insert(lib, names.iter().map(|n| (*n).to_owned()).collect());
@@ -352,45 +516,25 @@ mod tests {
     }
 
     #[test]
-    fn only_a_plain_dependency_can_be_proven_used() {
-        let toml = manifest(
-            "[dependencies]\nplain = \"1\"\nboth = \"1\"\n\
-             [dev-dependencies]\nboth = \"1\"\ndev = \"1\"\n\
-             [build-dependencies]\nbuild = \"1\"\n\
-             [target.'cfg(unix)'.dependencies]\nunix = \"1\"\n",
-        );
-        assert!(is_plain_dependency(&toml, "plain"));
-        // A target without the extern stays silent: no proof.
-        for key in ["both", "dev", "build", "unix", "absent"] {
-            assert!(!is_plain_dependency(&toml, key), "{key}");
-        }
-    }
-
-    #[test]
     fn a_target_where_rustc_kept_the_extern_proves_it_used() {
-        let declared = declared_externs(&manifest(
-            "[dependencies]\ntonic-prost = \"1\"\nidle = \"1\"\n",
-        ));
-        let package = lib_leaving_unused(&["idle"]);
-        assert!(proves_used(&package, &declared, "tonic-prost"));
-        assert!(!proves_used(&package, &declared, "idle"));
-    }
-
-    #[test]
-    fn rustc_naming_an_undeclared_extern_proves_nothing() {
-        // `md-5` builds a library named `md5`, not `md_5`.
-        let declared = declared_externs(&manifest("[dependencies]\nmd-5 = \"1\"\n"));
-        let package = lib_leaving_unused(&["md5"]);
-        assert!(!proves_used(&package, &declared, "md-5"));
+        let mut package = lib_leaving_unused(&["idle"]);
+        assert!(rustc_kept(&package, "tonic_prost"));
+        assert!(!rustc_kept(&package, "idle"));
+        // A test target leaving `tonic_prost` unused changes nothing.
+        let test = (vec!["test".to_owned()], "smoke".to_owned());
+        package.compiled.insert(test.clone());
+        package
+            .unused
+            .insert(test, ["tonic_prost".to_owned()].into_iter().collect());
+        assert!(rustc_kept(&package, "tonic_prost"));
     }
 
     #[test]
     fn an_unreadable_warning_or_no_compiled_target_proves_nothing() {
-        let declared = declared_externs(&manifest("[dependencies]\nprost = \"1\"\n"));
         let mut unreadable = lib_leaving_unused(&[]);
         unreadable.unreadable = true;
-        assert!(!proves_used(&unreadable, &declared, "prost"));
-        assert!(!proves_used(&PackageExterns::default(), &declared, "prost"));
+        assert!(!rustc_kept(&unreadable, "prost"));
+        assert!(!rustc_kept(&PackageExterns::default(), "prost"));
     }
 
     #[test]

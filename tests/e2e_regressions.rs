@@ -851,16 +851,24 @@ fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
 /// `include!` loads code using `codec` from `OUT_DIR`, like `include_proto!`.
 /// The `mac` derive emits `::rt::Thing`, like strum.
 /// `idle` is used nowhere.
+/// `wire` builds the library `wire_codec`, like `async-stripe-billing`.
+/// The `smoke` test target leaves every extern unused.
 fn macro_workspace() -> TempDir {
     let dir = TempDir::new().unwrap();
     let crates: &[(&str, &str)] = &[
         (
             "Cargo.toml",
-            "[workspace]\nmembers = [\"app\", \"codec\", \"rt\", \"mac\", \"idle\"]\nresolver = \"2\"\n",
+            "[workspace]\nmembers = [\"app\", \"codec\", \"rt\", \"mac\", \"idle\", \"wire\"]\nresolver = \"2\"\n",
         ),
         ("codec/src/lib.rs", "pub struct Codec;\n"),
         ("rt/src/lib.rs", "pub struct Thing;\n"),
         ("idle/src/lib.rs", "pub struct Idle;\n"),
+        (
+            "wire/Cargo.toml",
+            "[package]\nname = \"wire\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nname = \"wire_codec\"\n",
+        ),
+        ("wire/src/lib.rs", "pub struct Wire;\n"),
+        ("app/tests/smoke.rs", "#[test]\nfn smoke() {}\n"),
         (
             "mac/Cargo.toml",
             "[package]\nname = \"mac\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
@@ -880,7 +888,8 @@ fn macro_workspace() -> TempDir {
             "app/Cargo.toml",
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n\
              codec = { path = \"../codec\" }\nrt = { path = \"../rt\" }\n\
-             mac = { path = \"../mac\" }\nidle = { path = \"../idle\" }\n",
+             mac = { path = \"../mac\" }\nidle = { path = \"../idle\" }\n\
+             wire = { path = \"../wire\" }\n",
         ),
         (
             "app/build.rs",
@@ -892,7 +901,7 @@ fn macro_workspace() -> TempDir {
         ),
         (
             "app/src/lib.rs",
-            "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n\n#[derive(mac::Make)]\npub struct Widget;\n",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n\n#[derive(mac::Make)]\npub struct Widget;\n\npub use wire_codec::Wire;\n",
         ),
     ];
     for name in ["codec", "rt", "idle"] {
