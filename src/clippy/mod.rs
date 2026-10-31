@@ -533,14 +533,9 @@ pub struct PackageExterns {
     pub compiled: FxHashSet<(Vec<String>, String)>,
     /// Externs rustc reported unused, per target.
     pub unused: FxHashMap<(Vec<String>, String), FxHashSet<String>>,
-    /// Extern names of the package's own library targets.
-    pub own_libraries: FxHashSet<String>,
     /// rustc reported an unused extern without naming it readably.
     pub unreadable: bool,
 }
-
-/// Target kinds that compile to a library other targets link.
-const LIBRARY_KINDS: &[&str] = &["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
 
 impl ExternUsage {
     /// rustc's verdicts on the package of `manifest`, if clippy built it.
@@ -567,13 +562,6 @@ impl ExternUsage {
             let key = (target.kind, target.name);
             match (envelope.reason.as_str(), envelope.message) {
                 ("compiler-artifact", _) => {
-                    if key
-                        .0
-                        .iter()
-                        .any(|kind| LIBRARY_KINDS.contains(&kind.as_str()))
-                    {
-                        package.own_libraries.insert(key.1.replace('-', "_"));
-                    }
                     package.compiled.insert(key);
                 }
                 ("compiler-message", Some(diag)) if is_unused_extern(&diag) => {
@@ -605,7 +593,7 @@ fn is_unused_extern(diag: &RustcDiagnostic) -> bool {
 /// Canonicalize the path if possible, otherwise return it as-is.
 /// We need canonical paths so that filter matches work even when the
 /// user passed a relative path on the CLI but cargo emits absolute.
-fn canonicalize_or_self(path: &Path) -> PathBuf {
+pub(crate) fn canonicalize_or_self(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -647,7 +635,6 @@ mod tests {
         );
         assert!(package.compiled.contains(&lib));
         assert!(package.unused[&lib].contains("idle"));
-        assert!(package.own_libraries.contains("app"));
         assert!(!package.unreadable);
         assert!(
             usage
