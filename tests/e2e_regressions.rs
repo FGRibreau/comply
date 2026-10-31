@@ -407,13 +407,81 @@ fn missing_type_aware_toolchain_is_an_instruction_not_a_crash_issue_8109() {
     // Whether `node` itself or the package is what's absent decides which
     // sentence comply prints; both are toolchain gaps and both must exit 2
     // through the actionable path.
+    // An empty `COMPLY_TYPESCRIPT_GO_ROOTS` keeps the gap genuine.
+    // The host's own install would otherwise answer the lookup.
     common::comply()
+        .env("COMPLY_TYPESCRIPT_GO_ROOTS", "")
         .arg(dir.path())
         .assert()
         .code(2)
         .stderr(predicate::str::contains("comply: type-aware analysis needs"))
+        .stderr(predicate::str::contains("no global node_modules was found"))
         .stderr(predicate::str::contains("crashed unexpectedly").not())
         .stderr(predicate::str::contains("github.com/rbaumier/comply/issues").not());
+}
+
+/// Write a typescript-go stand-in under `node_modules`.
+/// It resolves as `<pkg>/unstable/sync` and `<pkg>/unstable/ast`.
+/// Its API refuses to start, on purpose.
+/// So a run that reaches it ends on `api-init-failed`.
+fn write_typescript_go_stub(node_modules: &std::path::Path, pkg: &str) {
+    let dir = node_modules.join(pkg);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("package.json"),
+        format!(
+            "{{\"name\":\"{pkg}\",\"version\":\"7.0.0\",\"exports\":{{\
+             \"./unstable/sync\":\"./sync.mjs\",\"./unstable/ast\":\"./ast.mjs\"}}}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("sync.mjs"),
+        "export const TypeFlags = {};\n\
+         export class API {\n\
+         constructor() { throw new Error(\"stub typescript-go\"); }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("ast.mjs"),
+        "export const SyntaxKind = {};\n\
+         export const computeLineStarts = () => [0];\n\
+         export const getTokenPosOfNode = () => 0;\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn type_aware_falls_back_to_a_machine_wide_typescript_go() {
+    // A repo on TypeScript 5 carries no typescript-go.
+    // A per-repo install is not the only kind.
+    // Refusing such repos earned each a symlink.
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("package.json"), "{\"name\":\"t\"}\n").unwrap();
+    fs::write(
+        dir.path().join("tsconfig.json"),
+        "{\"compilerOptions\":{\"strict\":true},\"include\":[\"src\"]}\n",
+    )
+    .unwrap();
+    fs::create_dir(dir.path().join("src")).unwrap();
+    fs::write(dir.path().join("src/index.ts"), "export const one = 1;\n").unwrap();
+
+    // Node resolves from a `node_modules` directory.
+    // That is what every route yields.
+    let global = TempDir::new().unwrap();
+    let node_modules = global.path().join("node_modules");
+    write_typescript_go_stub(&node_modules, "@typescript/native-preview");
+
+    common::comply()
+        .env("COMPLY_TYPESCRIPT_GO_ROOTS", &node_modules)
+        .arg(dir.path())
+        .assert()
+        .code(2)
+        // Reached from outside the project.
+        // No longer refused for being absent there.
+        .stderr(predicate::str::contains("api-init-failed"))
+        .stderr(predicate::str::contains("could not be resolved").not());
 }
 
 /// Enables the two opt-in French copy rules.
