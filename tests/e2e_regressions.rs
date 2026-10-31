@@ -1107,3 +1107,96 @@ fn vue_filter_sort_in_template_also_covers_to_sorted() {
     let findings = rule_findings("vue-no-filter-sort-in-template", "List.vue", source);
     assert_eq!(findings.len(), 1, "{findings:#?}");
 }
+
+/// The `no-manual-rtl-cleanup` findings on a Vitest project.
+/// `files` seeds it beside a spec that imports `cleanup`.
+fn rtl_cleanup_findings(files: &[(&str, &str)]) -> Vec<String> {
+    let dir = TempDir::new().unwrap();
+    let seeded = [
+        (
+            "package.json",
+            r#"{"name":"console","devDependencies":{"vitest":"^3","@testing-library/react":"^16"}}"#,
+        ),
+        (
+            "src/App.test.tsx",
+            "import { cleanup, render } from '@testing-library/react';\n\
+             import { afterEach, it } from 'vitest';\n\n\
+             afterEach(cleanup);\n\n\
+             it('renders', () => {\n  render(null);\n});\n",
+        ),
+    ];
+    for (path, content) in seeded.iter().chain(files) {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    let output = common::comply()
+        .arg("rules")
+        .arg("no-manual-rtl-cleanup")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("[no-manual-rtl-cleanup]"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A `vitest.config.ts` whose `test` block holds `test_options`.
+fn vitest_config(test_options: &str) -> String {
+    format!(
+        "import {{ defineConfig }} from 'vitest/config';\n\n\
+         export default defineConfig({{\n  test: {{\n    environment: 'node',\n{test_options}  }},\n}});\n"
+    )
+}
+
+#[test]
+fn rtl_cleanup_spares_a_manual_cleanup_under_globals_false() {
+    // The console's shape: RTL sees no global `afterEach`.
+    // It registers no cleanup, so the spec must.
+    let config = vitest_config("    globals: false,\n    setupFiles: ['./vitest.setup.ts'],\n");
+    let findings = rtl_cleanup_findings(&[
+        ("vitest.config.ts", &config),
+        ("vitest.setup.ts", "globalThis.window = {};\n"),
+    ]);
+    assert!(findings.is_empty(), "{findings:#?}");
+}
+
+#[test]
+fn rtl_cleanup_flags_a_manual_cleanup_under_globals_true() {
+    let config = vitest_config("    globals: true,\n");
+    let findings = rtl_cleanup_findings(&[("vitest.config.ts", &config)]);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert!(
+        findings[0].contains("`test.globals: true` in `vitest.config.ts`"),
+        "{findings:#?}"
+    );
+}
+
+#[test]
+fn rtl_cleanup_flags_a_cleanup_a_setup_file_already_runs() {
+    let config = vitest_config("    setupFiles: './vitest.setup.ts',\n");
+    let setup = "import { cleanup } from '@testing-library/react';\n\
+                 import { afterEach } from 'vitest';\n\n\
+                 afterEach(cleanup);\n";
+    let findings =
+        rtl_cleanup_findings(&[("vitest.config.ts", &config), ("vitest.setup.ts", setup)]);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert!(findings[0].contains("`vitest.setup.ts`"), "{findings:#?}");
+}
+
+#[test]
+fn rtl_cleanup_keeps_flagging_without_a_config_and_says_so() {
+    let findings = rtl_cleanup_findings(&[]);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert!(findings[0].contains("no Vitest config"), "{findings:#?}");
+}
+
+#[test]
+fn rtl_cleanup_keeps_flagging_an_unreadable_config_and_says_so() {
+    let config = "import { shared } from './shared';\n\nexport default shared('node');\n";
+    let findings = rtl_cleanup_findings(&[("vitest.config.ts", config)]);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert!(findings[0].contains("could not confirm"), "{findings:#?}");
+}
