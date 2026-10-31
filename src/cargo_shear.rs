@@ -18,6 +18,11 @@
 //!    becomes one comply diagnostic on the offending `Cargo.toml`. The
 //!    byte `offset` is converted to a 1-based line/column by reading the
 //!    manifest and counting newlines.
+//! 4. `drop_proven_used()` then drops the findings rustc contradicts.
+//!    cargo-shear reads sources and never expands a macro.
+//!    It misses code a derive emits, like `::strum::ParseError`.
+//!    It misses code `include!` loads from `OUT_DIR`, like `include_proto!`.
+//!    rustc judges after expansion, through clippy's run.
 //!
 //! Workspaces are de-duplicated so we don't shell out twice for the same
 //! manifest when many `.rs` files share a parent crate.
@@ -30,6 +35,7 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
 
+use crate::clippy::{ExternUsage, PackageExterns};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::files::SourceFile;
 use crate::runner_helpers;
@@ -92,13 +98,9 @@ fn lint_workspace(workspace: &Path) -> Result<Vec<Diagnostic>> {
 /// by design — flagging them as unused is noise because cargo-shear
 /// only sees the default feature set.
 fn is_optional_dep(manifest_path: &Path, message: &str) -> bool {
-    let dep_name = message
-        .split('`')
-        .nth(1)
-        .unwrap_or("");
-    if dep_name.is_empty() {
+    let Some(dep_name) = dependency_key(message) else {
         return false;
-    }
+    };
     let Ok(content) = fs::read_to_string(manifest_path) else {
         return false;
     };
@@ -117,6 +119,114 @@ fn is_optional_dep(manifest_path: &Path, message: &str) -> bool {
                 }
     }
     false
+}
+
+/// The dependency key a shear message names between backticks.
+fn dependency_key(message: &str) -> Option<&str> {
+    message.split('`').nth(1).filter(|name| !name.is_empty())
+}
+
+/// Drop each finding whose dependency rustc proves used.
+/// Every other diagnostic passes through untouched.
+pub fn drop_proven_used(diagnostics: Vec<Diagnostic>, usage: &ExternUsage) -> Vec<Diagnostic> {
+    diagnostics
+        .into_iter()
+        .filter(|diag| {
+            let proven = diag.rule_id == RULE_ID
+                && dependency_key(&diag.message)
+                    .is_some_and(|key| rustc_proves_used(&diag.path, key, usage));
+            !proven
+        })
+        .collect()
+}
+
+/// Dependency tables other than plain `[dependencies]`.
+/// Cargo still accepts the underscore spellings.
+const OTHER_DEPENDENCY_TABLES: &[&str] = &[
+    "dev-dependencies",
+    "dev_dependencies",
+    "build-dependencies",
+    "build_dependencies",
+];
+
+/// Whether rustc proves `key` used by `manifest`'s package.
+/// Proof: a compiled target where rustc kept the extern.
+/// Other dependency tables keep cargo-shear's verdict.
+fn rustc_proves_used(manifest: &Path, key: &str, usage: &ExternUsage) -> bool {
+    let Some(toml) = fs::read_to_string(manifest)
+        .ok()
+        .and_then(|content| content.parse::<toml::Value>().ok())
+    else {
+        return false;
+    };
+    let Some(package) = usage.package(manifest) else {
+        return false;
+    };
+    is_plain_dependency(&toml, key) && proves_used(package, &declared_externs(&toml), key)
+}
+
+/// rustc's half of the proof, once the manifest is read.
+/// An undeclared extern name means a renamed library.
+/// rustc's silence then proves nothing.
+fn proves_used(package: &PackageExterns, declared: &FxHashSet<String>, key: &str) -> bool {
+    let all_named = package
+        .unused
+        .values()
+        .flatten()
+        .all(|name| declared.contains(name) || package.own_libraries.contains(name));
+    if package.unreadable || !all_named {
+        return false;
+    }
+    let name = key.replace('-', "_");
+    package.compiled.iter().any(|target| {
+        !package
+            .unused
+            .get(target)
+            .is_some_and(|unused| unused.contains(&name))
+    })
+}
+
+/// `key` sits in `[dependencies]` and in no other dependency table.
+/// Only those reach every non-build target.
+fn is_plain_dependency(toml: &toml::Value, key: &str) -> bool {
+    let in_table = |table: Option<&toml::Value>| {
+        table
+            .and_then(toml::Value::as_table)
+            .is_some_and(|deps| deps.contains_key(key))
+    };
+    let elsewhere = OTHER_DEPENDENCY_TABLES
+        .iter()
+        .any(|name| in_table(toml.get(*name)))
+        || platform_tables(toml).any(|platform| {
+            platform
+                .values()
+                .any(|table| table.as_table().is_some_and(|deps| deps.contains_key(key)))
+        });
+    in_table(toml.get("dependencies")) && !elsewhere
+}
+
+/// The `[target.'cfg(…)']` tables of a manifest.
+fn platform_tables(
+    toml: &toml::Value,
+) -> impl Iterator<Item = &toml::map::Map<String, toml::Value>> {
+    toml.get("target")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(|targets| targets.values().filter_map(toml::Value::as_table))
+}
+
+/// The extern name of every key in every dependency table.
+fn declared_externs(toml: &toml::Value) -> FxHashSet<String> {
+    let top = ["dependencies"]
+        .iter()
+        .chain(OTHER_DEPENDENCY_TABLES)
+        .filter_map(|name| toml.get(*name));
+    let platform = platform_tables(toml).flat_map(|platform| platform.values());
+    top.chain(platform)
+        .filter_map(toml::Value::as_table)
+        .flat_map(|deps| deps.keys())
+        .map(|key| key.replace('-', "_"))
+        .collect()
 }
 
 /// Convert each shear finding into a comply Diagnostic. We only emit
@@ -223,6 +333,64 @@ mod tests {
         let raw = br#"{"summary":{"errors":0,"warnings":0,"fixed":0},"findings":[]}"#;
         let report: ShearReport = serde_json::from_slice(raw).unwrap();
         assert!(report.findings.is_empty());
+    }
+
+    fn manifest(text: &str) -> toml::Value {
+        text.parse().unwrap()
+    }
+
+    /// One compiled `lib` target, with the externs rustc found unused.
+    fn lib_leaving_unused(names: &[&str]) -> PackageExterns {
+        let lib = (vec!["lib".to_owned()], "app".to_owned());
+        let mut package = PackageExterns::default();
+        package.compiled.insert(lib.clone());
+        package.own_libraries.insert("app".to_owned());
+        package
+            .unused
+            .insert(lib, names.iter().map(|n| (*n).to_owned()).collect());
+        package
+    }
+
+    #[test]
+    fn only_a_plain_dependency_can_be_proven_used() {
+        let toml = manifest(
+            "[dependencies]\nplain = \"1\"\nboth = \"1\"\n\
+             [dev-dependencies]\nboth = \"1\"\ndev = \"1\"\n\
+             [build-dependencies]\nbuild = \"1\"\n\
+             [target.'cfg(unix)'.dependencies]\nunix = \"1\"\n",
+        );
+        assert!(is_plain_dependency(&toml, "plain"));
+        // A target without the extern stays silent: no proof.
+        for key in ["both", "dev", "build", "unix", "absent"] {
+            assert!(!is_plain_dependency(&toml, key), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_target_where_rustc_kept_the_extern_proves_it_used() {
+        let declared = declared_externs(&manifest(
+            "[dependencies]\ntonic-prost = \"1\"\nidle = \"1\"\n",
+        ));
+        let package = lib_leaving_unused(&["idle"]);
+        assert!(proves_used(&package, &declared, "tonic-prost"));
+        assert!(!proves_used(&package, &declared, "idle"));
+    }
+
+    #[test]
+    fn rustc_naming_an_undeclared_extern_proves_nothing() {
+        // `md-5` builds a library named `md5`, not `md_5`.
+        let declared = declared_externs(&manifest("[dependencies]\nmd-5 = \"1\"\n"));
+        let package = lib_leaving_unused(&["md5"]);
+        assert!(!proves_used(&package, &declared, "md-5"));
+    }
+
+    #[test]
+    fn an_unreadable_warning_or_no_compiled_target_proves_nothing() {
+        let declared = declared_externs(&manifest("[dependencies]\nprost = \"1\"\n"));
+        let mut unreadable = lib_leaving_unused(&[]);
+        unreadable.unreadable = true;
+        assert!(!proves_used(&unreadable, &declared, "prost"));
+        assert!(!proves_used(&PackageExterns::default(), &declared, "prost"));
     }
 
     #[test]

@@ -847,3 +847,111 @@ fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
     assert!(fixed.contains("is_empty()"), "{fixed}");
     assert!(fixed.contains("x >= 1 && x < 10"), "{fixed}");
 }
+
+/// `include!` loads code using `codec` from `OUT_DIR`, like `include_proto!`.
+/// The `mac` derive emits `::rt::Thing`, like strum.
+/// `idle` is used nowhere.
+fn macro_workspace() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let crates: &[(&str, &str)] = &[
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"app\", \"codec\", \"rt\", \"mac\", \"idle\"]\nresolver = \"2\"\n",
+        ),
+        ("codec/src/lib.rs", "pub struct Codec;\n"),
+        ("rt/src/lib.rs", "pub struct Thing;\n"),
+        ("idle/src/lib.rs", "pub struct Idle;\n"),
+        (
+            "mac/Cargo.toml",
+            "[package]\nname = \"mac\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\nproc-macro = true\n",
+        ),
+        (
+            "mac/src/lib.rs",
+            "use proc_macro::TokenStream;\n\n\
+             #[proc_macro_derive(Make)]\n\
+             pub fn make(input: TokenStream) -> TokenStream {\n    \
+                 let text = input.to_string();\n    \
+                 let name = text.split_whitespace().skip_while(|w| *w != \"struct\").nth(1).unwrap();\n    \
+                 let name = name.trim_end_matches(';');\n    \
+                 format!(\"impl {name} {{ pub fn thing() -> ::rt::Thing {{ ::rt::Thing }} }}\").parse().unwrap()\n\
+             }\n",
+        ),
+        (
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n\
+             codec = { path = \"../codec\" }\nrt = { path = \"../rt\" }\n\
+             mac = { path = \"../mac\" }\nidle = { path = \"../idle\" }\n",
+        ),
+        (
+            "app/build.rs",
+            "fn main() {\n    \
+                 let out = std::env::var(\"OUT_DIR\").unwrap();\n    \
+                 let code = \"pub fn codec() -> ::codec::Codec { ::codec::Codec }\\n\";\n    \
+                 std::fs::write(format!(\"{out}/gen.rs\"), code).unwrap();\n\
+             }\n",
+        ),
+        (
+            "app/src/lib.rs",
+            "include!(concat!(env!(\"OUT_DIR\"), \"/gen.rs\"));\n\n#[derive(mac::Make)]\npub struct Widget;\n",
+        ),
+    ];
+    for name in ["codec", "rt", "idle"] {
+        let manifest = dir.path().join(name).join("Cargo.toml");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(
+            manifest,
+            format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        )
+        .unwrap();
+    }
+    for (path, content) in crates {
+        let path = dir.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    dir
+}
+
+/// The `rust-unused-dep` findings of a comply run on `dir`.
+fn unused_dep_findings(dir: &TempDir) -> Vec<String> {
+    let output = common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("[rust-unused-dep]"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn rust_unused_dep_spares_a_dependency_of_code_generated_in_out_dir() {
+    // cargo-shear never reads `OUT_DIR`, so it flags `codec`.
+    // Removing it would break `include!`'s generated code.
+    let findings = unused_dep_findings(&macro_workspace());
+    assert!(
+        !findings.iter().any(|f| f.contains("`codec`")),
+        "{findings:#?}"
+    );
+}
+
+#[test]
+fn rust_unused_dep_spares_the_runtime_crate_of_a_derive() {
+    // cargo-shear never expands the derive, so it flags `rt`.
+    // The emitted `::rt::Thing` needs it.
+    let findings = unused_dep_findings(&macro_workspace());
+    assert!(
+        !findings.iter().any(|f| f.contains("`rt`")),
+        "{findings:#?}"
+    );
+}
+
+#[test]
+fn rust_unused_dep_still_reports_a_dependency_nothing_uses() {
+    let findings = unused_dep_findings(&macro_workspace());
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert!(findings[0].contains("app/Cargo.toml"), "{findings:#?}");
+    assert!(findings[0].contains("`idle`"), "{findings:#?}");
+}
