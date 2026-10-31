@@ -964,3 +964,146 @@ fn rust_unused_dep_still_reports_a_dependency_nothing_uses() {
     assert!(findings[0].contains("app/Cargo.toml"), "{findings:#?}");
     assert!(findings[0].contains("`idle`"), "{findings:#?}");
 }
+
+/// The `react-no-sort-for-extrema` findings on a file holding `source`.
+fn sort_for_extrema_findings(source: &str) -> Vec<String> {
+    let (dir, _path) = write_ts_file("extrema.ts", source);
+    let output = common::comply()
+        .arg("rules")
+        .arg("react-no-sort-for-extrema")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("[react-no-sort-for-extrema]"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `body` sorts `a` only to read one end of it.
+fn assert_extremum_flagged(body: &str) {
+    let source = format!("export const pick = (a: number[]) => {body};\n");
+    let findings = sort_for_extrema_findings(&source);
+    assert_eq!(findings.len(), 1, "{body}: {findings:#?}");
+}
+
+#[test]
+fn sort_for_extrema_flags_to_sorted_at_index_zero() {
+    assert_extremum_flagged("a.toSorted((x, y) => x - y)[0]");
+}
+
+#[test]
+fn sort_for_extrema_flags_to_sorted_at_the_last_index() {
+    assert_extremum_flagged("a.toSorted((x, y) => x - y)[a.length - 1]");
+}
+
+#[test]
+fn sort_for_extrema_flags_to_sorted_then_at_zero() {
+    assert_extremum_flagged("a.toSorted((x, y) => x - y).at(0)");
+}
+
+#[test]
+fn sort_for_extrema_flags_to_sorted_then_at_minus_one() {
+    assert_extremum_flagged("a.toSorted((x, y) => x - y).at(-1)");
+}
+
+#[test]
+fn sort_for_extrema_flags_sort_then_at_zero() {
+    assert_extremum_flagged("[...a].sort((x, y) => x - y).at(0)");
+}
+
+#[test]
+fn sort_for_extrema_flags_sort_then_at_minus_one() {
+    assert_extremum_flagged("[...a].sort((x, y) => x - y).at(-1)");
+}
+
+#[test]
+fn sort_for_extrema_flags_a_to_sorted_binding_read_at_one_end() {
+    assert_extremum_flagged(
+        "{ const sorted = a.toSorted((x, y) => x - y); return sorted.at(-1); }",
+    );
+}
+
+#[test]
+fn sort_for_extrema_spares_a_to_sorted_array_kept_whole() {
+    // The code reads the whole sorted order.
+    // A single pass cannot replace it.
+    let source = "\
+export const ranked = (a: number[]) => a.toSorted((x, y) => x - y);
+export function report(a: number[]) {
+  const sorted = a.toSorted((x, y) => x - y);
+  return { min: sorted.at(0), all: sorted };
+}
+";
+    let findings = sort_for_extrema_findings(source);
+    assert!(findings.is_empty(), "{findings:#?}");
+}
+
+#[test]
+fn sort_for_extrema_spares_a_to_sorted_read_in_the_middle() {
+    // A median or a rank needs the sort.
+    let source = "\
+export const second = (a: number[]) => a.toSorted((x, y) => x - y)[1];
+export const median = (a: number[]) => a.toSorted((x, y) => x - y).at(a.length >> 1);
+export const runnerUp = (a: number[]) => a.toSorted((x, y) => x - y).at(-2);
+export const nth = (a: number[], i: number) => a.toSorted((x, y) => x - y).at(i);
+";
+    let findings = sort_for_extrema_findings(source);
+    assert!(findings.is_empty(), "{findings:#?}");
+}
+
+/// The findings of `rule` on a file `name` holding `source`.
+fn rule_findings(rule: &str, name: &str, source: &str) -> Vec<String> {
+    let (dir, _path) = write_ts_file(name, source);
+    let output = common::comply()
+        .arg("rules")
+        .arg(rule)
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    let tag = format!("[{rule}]");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains(&tag))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn sort_without_comparator_also_covers_to_sorted() {
+    // `toSorted()` sorts by string too: `[10, 2, 1]` gives `[1, 10, 2]`.
+    let source = "\
+export const bad = (a: number[]) => a.toSorted();
+export const good = (a: number[]) => a.toSorted((x, y) => x - y);
+";
+    let findings = rule_findings("no-sort-without-comparator", "sorted.ts", source);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert!(findings[0].contains("sorted.ts:1:"), "{findings:#?}");
+}
+
+#[test]
+fn for_in_iterable_also_covers_the_copying_array_methods() {
+    let source = "\
+export function keys(a: number[]) {
+  for (const k in a.toSorted((x, y) => x - y)) console.log(k);
+  for (const k in a.toReversed()) console.log(k);
+  for (const k in a.toSpliced(0, 1)) console.log(k);
+}
+";
+    let findings = rule_findings("no-for-in-iterable", "keys.ts", source);
+    assert_eq!(findings.len(), 3, "{findings:#?}");
+}
+
+#[test]
+fn vue_filter_sort_in_template_also_covers_to_sorted() {
+    let source = "\
+<template>
+  <ul>
+    <li v-for=\"item in items.toSorted(byName)\" :key=\"item.id\">{{ item.name }}</li>
+  </ul>
+</template>
+";
+    let findings = rule_findings("vue-no-filter-sort-in-template", "List.vue", source);
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+}
