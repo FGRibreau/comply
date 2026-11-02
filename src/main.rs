@@ -705,8 +705,9 @@ fn lint_project(cli: &Cli) -> Result<bool> {
     if cli.diff_only {
         let changed = changed_lines::changed_lines(&mode)?;
         paths_root = changed_lines::git_repo_root().unwrap_or(paths_root);
+        let cwd = std::env::current_dir().unwrap_or_default();
         for diag in &mut after_suppressions {
-            let normalised = changed_lines::normalise_path(diag.path.as_ref(), &paths_root);
+            let normalised = changed_lines::normalise_path(diag.path.as_ref(), &paths_root, &cwd);
             diag.path = std::sync::Arc::from(normalised);
         }
         changed_lines::retain_in_diff(&mut after_suppressions, &changed);

@@ -385,6 +385,41 @@ fn diff_only_survives_a_non_utf8_file_in_the_diff_issue_8502() {
 }
 
 #[test]
+fn diff_only_from_a_subdirectory_keeps_the_staged_findings() {
+    // From a subdirectory, `--staged` lists cwd-relative paths.
+    // The diff keys stay repo-relative.
+    // The gate then answered "all clear".
+    // The same index had findings from the root.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let sub = root.join("sub");
+    fs::create_dir(&sub).unwrap();
+    common::without_type_aware_rules(root);
+    common::without_type_aware_rules(&sub);
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+
+    fs::write(sub.join("a.ts"), "export const one = 1;\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+
+    fs::write(
+        sub.join("a.ts"),
+        "export const one = 1;\nexport const two = a ? b ? 1 : 2 : 3;\n",
+    )
+    .unwrap();
+    git(root, &["add", "-A"]);
+
+    common::comply()
+        .current_dir(&sub)
+        .args(["--staged", "--diff-only"])
+        .assert()
+        .stdout(predicate::str::contains("a.ts:2"))
+        .stdout(predicate::str::contains("no-nested-ternary"));
+}
+
+#[test]
 fn missing_type_aware_toolchain_is_an_instruction_not_a_crash_issue_8109() {
     // A TypeScript project with a tsconfig.json but no typescript-go API package
     // in its node_modules is every repo you clone. comply diagnoses that gap

@@ -192,12 +192,14 @@ pub fn retain_in_diff(diagnostics: &mut Vec<Diagnostic>, changed: &ChangedLines)
 
 /// Normalise a diagnostic's path to repo-relative form for lookup in
 /// the `ChangedLines` map. Git emits repo-relative paths; diagnostics
-/// may carry absolute paths (rules get a `&Path` that can be either).
-/// Strips the `repo_root` prefix when present; otherwise returns the
-/// path unchanged.
+/// may carry absolute paths (rules get a `&Path` that can be either), or
+/// paths relative to `cwd` when comply runs from a subdirectory.
+/// Resolves the path against `cwd`, then strips `repo_root`.
+/// Otherwise returns the path unchanged.
 #[must_use]
-pub fn normalise_path(path: &Path, repo_root: &Path) -> PathBuf {
-    path.strip_prefix(repo_root)
+pub fn normalise_path(path: &Path, repo_root: &Path, cwd: &Path) -> PathBuf {
+    cwd.join(path)
+        .strip_prefix(repo_root)
         .map_or_else(|_| path.to_path_buf(), Path::to_path_buf)
 }
 
@@ -464,13 +466,19 @@ diff --git a/x.rs b/x.rs
 
     #[test]
     fn normalise_path_strips_repo_root() {
-        let got = normalise_path(Path::new("/repo/src/f.rs"), Path::new("/repo"));
+        let got = normalise_path(Path::new("/repo/src/f.rs"), Path::new("/repo"), Path::new("/repo"));
         assert_eq!(got, PathBuf::from("src/f.rs"));
     }
 
     #[test]
     fn normalise_path_leaves_unrelated_paths() {
-        let got = normalise_path(Path::new("src/f.rs"), Path::new("/repo"));
+        let got = normalise_path(Path::new("src/f.rs"), Path::new("/repo"), Path::new("/elsewhere"));
+        assert_eq!(got, PathBuf::from("src/f.rs"));
+    }
+
+    #[test]
+    fn normalise_path_resolves_a_path_relative_to_a_subdirectory() {
+        let got = normalise_path(Path::new("f.rs"), Path::new("/repo"), Path::new("/repo/src"));
         assert_eq!(got, PathBuf::from("src/f.rs"));
     }
 }
