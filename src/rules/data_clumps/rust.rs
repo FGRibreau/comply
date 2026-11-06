@@ -35,6 +35,12 @@
 //! shared fields into a nested type would change the layout and break the
 //! contract.
 //!
+//! ORM models that map one column per field are excluded.
+//! Their fields mirror the table, so nothing can be nested.
+//! Two derives qualify: `fabrique::Model` and `DeriveEntityModel`.
+//! A bare `Model` needs an import from `fabrique`.
+//! sqlx `FromRow` and diesel derives still count: they can nest.
+//!
 //! A subset that is the complete field set of some — but not all —
 //! participating structs is not reported: the saturated struct already *is* the
 //! shared type the message asks for, so the only edit left is nesting it inside
@@ -59,7 +65,10 @@ crate::ast_check! { on ["source_file"] => |node, source, ctx, diagnostics|
     }
 
     let mut struct_fields: Vec<StructFields> = Vec::new();
-    collect_structs(node, source, ctx, &mut struct_fields);
+    let scope = OrmScope {
+        fabrique_model: imports_fabrique_model(node, source),
+    };
+    collect_structs(node, source, ctx, scope, &mut struct_fields);
     dedup_cfg_twins(&mut struct_fields);
 
     // For each 3-field subset, record every struct that contains it, noting
@@ -203,6 +212,7 @@ fn collect_structs(
     node: tree_sitter::Node,
     source: &[u8],
     ctx: &crate::rules::backend::CheckCtx,
+    scope: OrmScope,
     out: &mut Vec<StructFields>,
 ) {
     if node.kind() == "struct_item" {
@@ -244,6 +254,7 @@ fn collect_structs(
         if fields.len() >= 3
             && !is_borrowed_view_struct(node)
             && !has_layout_repr_attr(node, source)
+            && !maps_table_columns(node, source, scope)
         {
             let name = node
                 .child_by_field_name("name")
@@ -263,7 +274,7 @@ fn collect_structs(
     let mut cursor = node.walk();
     if cursor.goto_first_child() {
         loop {
-            collect_structs(cursor.node(), source, ctx, out);
+            collect_structs(cursor.node(), source, ctx, scope, out);
             if !cursor.goto_next_sibling() {
                 break;
             }
@@ -558,6 +569,98 @@ fn repr_attr_constrains_layout(attribute_item: tree_sitter::Node, source: &[u8])
         let head = tok.trim().split('(').next().unwrap_or("").trim();
         matches!(head, "C" | "packed" | "transparent" | "align")
     })
+}
+
+/// What the file brings into scope for ORM model detection.
+#[derive(Clone, Copy)]
+struct OrmScope {
+    /// True when a bare `Model` derive is fabrique's.
+    fabrique_model: bool,
+}
+
+/// True when the file imports `Model` from `fabrique`.
+/// A glob import (`fabrique::prelude::*`) counts as well.
+fn imports_fabrique_model(root: tree_sitter::Node, source: &[u8]) -> bool {
+    if root.kind() == "use_declaration"
+        && let Some(argument) = root.child_by_field_name("argument")
+        && let Ok(text) = argument.utf8_text(source)
+    {
+        let path: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let rooted = path.trim_start_matches("::");
+        return rooted.starts_with("fabrique::")
+            && (rooted.contains('*')
+                || rooted
+                    .split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .any(|ident| ident == "Model"));
+    }
+    let mut cursor = root.walk();
+    root.named_children(&mut cursor)
+        .any(|child| imports_fabrique_model(child, source))
+}
+
+/// True when `struct_node` derives a table model.
+/// Each field is one column. No group can move out.
+/// Only derives that cannot nest fields qualify.
+fn maps_table_columns(struct_node: tree_sitter::Node, source: &[u8], scope: OrmScope) -> bool {
+    let mut sibling = struct_node.prev_named_sibling();
+    while let Some(s) = sibling {
+        match s.kind() {
+            "line_comment" | "block_comment" => {}
+            "attribute_item" => {
+                if derives(s, source)
+                    .iter()
+                    .any(|path| is_table_model_derive(path, scope))
+                {
+                    return true;
+                }
+            }
+            _ => break,
+        }
+        sibling = s.prev_named_sibling();
+    }
+    false
+}
+
+/// The derive paths of a `#[derive(...)]` attribute, whitespace removed.
+/// Any other attribute yields an empty list.
+fn derives(attribute_item: tree_sitter::Node, source: &[u8]) -> Vec<String> {
+    let mut cursor = attribute_item.walk();
+    let Some(attribute) = attribute_item
+        .children(&mut cursor)
+        .find(|child| child.kind() == "attribute")
+    else {
+        return Vec::new();
+    };
+    if attribute
+        .named_child(0)
+        .and_then(|path| path.utf8_text(source).ok())
+        != Some("derive")
+    {
+        return Vec::new();
+    }
+    let Some(text) = attribute
+        .child_by_field_name("arguments")
+        .and_then(|args| args.utf8_text(source).ok())
+    else {
+        return Vec::new();
+    };
+    text.trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split(',')
+        .map(|path| path.chars().filter(|c| !c.is_whitespace()).collect())
+        .collect()
+}
+
+/// True for a derive whose fields are columns, one each.
+/// fabrique has no nested field attribute.
+/// sea-orm's `DeriveEntityModel` has none either.
+fn is_table_model_derive(path: &str, scope: OrmScope) -> bool {
+    let path = path.trim_start_matches("::");
+    let last = path.rsplit("::").next().unwrap_or(path);
+    last == "DeriveEntityModel"
+        || path == "fabrique::Model"
+        || (path == "Model" && scope.fabrique_model)
 }
 
 /// Generate all sorted subsets of size `k` from `items`.
@@ -1008,6 +1111,195 @@ struct IntB {
 }
 "#;
         assert_eq!(run_on(src).len(), 2);
+    }
+
+    /// Two fabrique models over related tables.
+    /// Each field is a column, so nothing can be extracted.
+    #[test]
+    fn allows_fabrique_models_mapping_their_columns() {
+        let src = r#"
+use fabrique::{Factory, Model, Query};
+
+#[derive(Debug, Clone, Factory, Model, Serialize)]
+#[fabrique(table = "managed.service")]
+pub struct ManagedService {
+    #[fabrique(primary_key)]
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub icon_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Model, Serialize)]
+#[fabrique(table = "managed.service_view")]
+pub struct ManagedServiceView {
+    #[fabrique(primary_key)]
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub icon_url: Option<String>,
+    pub plan_count: i64,
+}
+"#;
+        assert!(run_on(src).is_empty());
+    }
+
+    /// A model and its input side, without the server-set fields.
+    /// Only the input struct can still clump.
+    #[test]
+    fn allows_a_fabrique_model_beside_its_input_struct() {
+        let src = r#"
+use fabrique::{Model, Query};
+
+#[derive(Debug, Clone, Model)]
+#[fabrique(table = "location.subprocessor")]
+pub struct Subprocessor {
+    #[fabrique(primary_key)]
+    pub id: Uuid,
+    pub legal_entity: String,
+    pub kind: SubprocessorKind,
+    pub residency: Residency,
+    pub evidence_ref: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SubprocessorFacts {
+    pub legal_entity: String,
+    pub kind: SubprocessorKind,
+    pub residency: Residency,
+    pub evidence_ref: Option<String>,
+}
+"#;
+        assert!(run_on(src).is_empty());
+    }
+
+    #[test]
+    fn allows_path_qualified_and_glob_imported_fabrique_models() {
+        let src = r#"
+use fabrique::prelude::*;
+
+#[derive(fabrique::Model)]
+struct Alpha {
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+#[derive(Debug, Model)]
+struct Beta {
+    a: u32,
+    b: u32,
+    c: u32,
+}
+"#;
+        assert!(run_on(src).is_empty());
+    }
+
+    #[test]
+    fn allows_sea_orm_entity_models() {
+        let src = r#"
+mod cake {
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "cake")]
+    pub struct Model {
+        pub id: i32,
+        pub name: String,
+        pub price: i64,
+    }
+}
+
+mod pie {
+    #[derive(Clone, Debug, PartialEq, sea_orm::DeriveEntityModel)]
+    #[sea_orm(table_name = "pie")]
+    pub struct Model {
+        pub id: i32,
+        pub name: String,
+        pub price: i64,
+    }
+}
+"#;
+        assert!(run_on(src).is_empty());
+    }
+
+    /// A bare `Model` derive not imported from fabrique is unknown.
+    /// Its crate may nest fields, so the clump stands.
+    #[test]
+    fn still_flags_a_model_derive_not_from_fabrique() {
+        let src = r#"
+use fabrique::{Factory, Query};
+use other_orm::Model;
+
+#[derive(Model)]
+struct Alpha {
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+#[derive(Model)]
+struct Beta {
+    a: u32,
+    b: u32,
+    c: u32,
+}
+"#;
+        assert_eq!(run_on(src).len(), 2);
+    }
+
+    /// sqlx can nest a group with `#[sqlx(flatten)]`.
+    /// The advice to extract a type stays actionable.
+    #[test]
+    fn still_flags_sqlx_from_row_structs() {
+        let src = r#"
+#[derive(sqlx::FromRow)]
+struct Alpha {
+    a: u32,
+    b: u32,
+    c: u32,
+}
+
+#[derive(FromRow)]
+struct Beta {
+    a: u32,
+    b: u32,
+    c: u32,
+}
+"#;
+        assert_eq!(run_on(src).len(), 2);
+    }
+
+    /// A model beside two plain structs repeating one group.
+    /// The plain pair is still a clump.
+    #[test]
+    fn still_flags_plain_structs_beside_a_model() {
+        let src = r#"
+use fabrique::Model;
+
+#[derive(Model)]
+struct Listener {
+    id: u64,
+    host: String,
+    port: u16,
+    proto: u8,
+}
+
+struct Dial {
+    host: String,
+    port: u16,
+    proto: u8,
+    timeout: u64,
+}
+
+struct Bind {
+    host: String,
+    port: u16,
+    proto: u8,
+    backlog: u32,
+}
+"#;
+        let lines: Vec<usize> = run_on(src).iter().map(|d| d.line).collect();
+        assert_eq!(lines, vec![12, 19]);
     }
 
     /// The two structs share the names `[major, minor, patch]`, but `minor` and
