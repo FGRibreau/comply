@@ -1429,3 +1429,47 @@ fn rtl_cleanup_keeps_flagging_an_unreadable_config_and_says_so() {
     assert_eq!(findings.len(), 1, "{findings:#?}");
     assert!(findings[0].contains("could not confirm"), "{findings:#?}");
 }
+
+#[test]
+fn range_scan_keeps_type_aware_findings_in_a_subdirectory_package() {
+    // A monorepo with its TypeScript package in `console/`.
+    // A range scan must keep the type-aware oxlint findings.
+    // No tsconfig: the sidecar rules opt out, oxlint still runs.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "user.name", "test"]);
+    fs::write(
+        root.join("package.json"),
+        "{\"name\":\"mono\",\"private\":true}\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("console/src")).unwrap();
+    fs::write(
+        root.join("console/package.json"),
+        "{\"name\":\"console\",\"private\":true}\n",
+    )
+    .unwrap();
+    fs::write(root.join("console/src/a.ts"), "export const one = 1;\n").unwrap();
+    common::without_type_aware_rules(&root.join("console"));
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "base"]);
+    fs::write(
+        root.join("console/src/a.ts"),
+        "export function double(count: number) {\n  return count * 2;\n}\n",
+    )
+    .unwrap();
+    git(root, &["commit", "-qam", "change"]);
+
+    for cwd in [root.to_path_buf(), root.join("console")] {
+        common::comply()
+            .current_dir(&cwd)
+            .args(["--range", "HEAD~1", "HEAD"])
+            .assert()
+            .code(1)
+            .stdout(predicate::str::contains(
+                "typescript(explicit-function-return-type)",
+            ));
+    }
+}
