@@ -1,12 +1,13 @@
 //! Type-aware analysis phase.
 //!
-//! Runs comply's custom type-aware rules (`Backend::TypeAware`) that need a
-//! resolved TypeScript program — type queries, structural comparison — which
-//! no in-process tree-sitter pass can answer. comply drives a TypeScript
-//! checker (typescript-go, from `typescript` >= 7, its side-by-side alias
-//! `@typescript/native`, or else `@typescript/native-preview`) through a Node sidecar: it sends the tsconfig
-//! + file list + enabled rule ids, the sidecar builds the program once and
-//! returns the violations as JSON.
+//! Runs the custom type-aware rules (`Backend::TypeAware`).
+//! They need a resolved TypeScript program.
+//! No in-process tree-sitter pass answers type queries.
+//! The checker is typescript-go, driven through a Node sidecar.
+//! Sources: `typescript` 7+, `@typescript/native`, or the preview.
+//! One sidecar run per `tsconfig.json` above the linted files.
+//! It gets the tsconfig, files and enabled rule ids.
+//! It builds the program and returns the violations as JSON.
 //!
 //! The checker is resolved from the project first.
 //! A machine-wide install answers next, in three layouts.
@@ -125,16 +126,33 @@ pub fn lint_files(files: &[&SourceFile], config: &Config) -> Result<Vec<Diagnost
         .into());
     }
 
-    let Some(tsconfig) = find_tsconfig(files) else {
-        // JavaScript carries no type annotations.
-        // So these rules have no program to build.
-        // Nothing of their kind to analyze.
-        // The TS-family grouping only brought it here.
-        if files.iter().all(|f| crate::files::is_javascript_source(&f.path)) {
-            return Ok(vec![]);
+    // Each file joins the program of its nearest tsconfig.json.
+    // JavaScript without one has no annotations to analyze.
+    // TypeScript without one is a refusal.
+    let mut programs: std::collections::BTreeMap<PathBuf, Vec<&SourceFile>> =
+        std::collections::BTreeMap::new();
+    for file in files {
+        match find_tsconfig(file) {
+            Some(tsconfig) => programs.entry(tsconfig).or_default().push(file),
+            None if crate::files::is_javascript_source(&file.path) => {}
+            None => return Err(no_tsconfig(&enabled).into()),
         }
-        return Err(no_tsconfig(&enabled).into());
-    };
+    }
+
+    let mut diagnostics = Vec::new();
+    for (tsconfig, program_files) in &programs {
+        diagnostics.extend(lint_program(tsconfig, program_files, &enabled, config)?);
+    }
+    Ok(diagnostics)
+}
+
+/// Run `enabled` over `files` in the `tsconfig` program.
+fn lint_program(
+    tsconfig: &Path,
+    files: &[&SourceFile],
+    enabled: &[&'static crate::rules::meta::RuleMeta],
+    config: &Config,
+) -> Result<Vec<Diagnostic>> {
     let project_dir = tsconfig
         .parent()
         .map(Path::to_path_buf)
@@ -197,7 +215,7 @@ pub fn lint_files(files: &[&SourceFile], config: &Config) -> Result<Vec<Diagnost
 
     Ok(map_diagnostics(
         response.diagnostics,
-        &enabled,
+        enabled,
         &canon_to_orig,
     ))
 }
@@ -337,12 +355,10 @@ fn tsgo_module_root(path: &OsStr) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// Path to the nearest `tsconfig.json` walking up from the first file's
-/// directory. `walk_up_finding` yields the containing directory, so the
-/// filename is appended.
-fn find_tsconfig(files: &[&SourceFile]) -> Option<PathBuf> {
-    let first = files.first()?;
-    let start = std::fs::canonicalize(&first.path)
+/// Nearest `tsconfig.json` above `file`'s directory.
+/// `walk_up_finding` yields its directory, so the name is appended.
+fn find_tsconfig(file: &SourceFile) -> Option<PathBuf> {
+    let start = std::fs::canonicalize(&file.path)
         .ok()?
         .parent()?
         .to_path_buf();

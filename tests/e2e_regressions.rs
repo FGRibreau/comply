@@ -1027,6 +1027,33 @@ fn a_javascript_only_set_is_not_refused_for_a_missing_tsconfig() {
 }
 
 #[test]
+fn a_tsconfig_is_looked_up_for_every_typescript_file_not_only_the_first_file() {
+    // Scripts in deploy/, TypeScript in frontend/, both staged.
+    // The lookup started from the first file only.
+    // It refused although frontend/ has a tsconfig.json.
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("package.json"), "{\"name\":\"t\"}\n").unwrap();
+    fs::create_dir(dir.path().join("deploy")).unwrap();
+    fs::write(dir.path().join("deploy/render.mjs"), "export const page = 1;\n").unwrap();
+    fs::create_dir(dir.path().join("frontend")).unwrap();
+    fs::write(
+        dir.path().join("frontend/tsconfig.json"),
+        "{\"compilerOptions\":{\"strict\":true},\"include\":[\"*.ts\"]}\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("frontend/a.ts"), "export const one = 1;\n").unwrap();
+
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "deploy", "frontend/a.ts"]);
+
+    common::comply()
+        .current_dir(dir.path())
+        .args(["--staged", "--diff-only"])
+        .assert()
+        .stderr(predicate::str::contains("no tsconfig.json").not());
+}
+
+#[test]
 fn type_aware_rules_that_could_not_run_are_an_error_not_all_clear() {
     // The phase needs a tsconfig.json for its program.
     // Without one it skipped every rule on a notice.
