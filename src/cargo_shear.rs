@@ -28,8 +28,8 @@
 //! Workspaces are de-duplicated so we don't shell out twice for the same
 //! manifest when many `.rs` files share a parent crate.
 
-use rustc_hash::{FxHashMap, FxHashSet};
 use anyhow::{Context, Result};
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use std::fs;
@@ -153,13 +153,13 @@ fn is_optional_dep(manifest_path: &Path, message: &str) -> bool {
     for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
         if let Some(deps) = toml.get(section).and_then(|d| d.as_table())
             && let Some(entry) = deps.get(dep_name)
-                && entry
-                    .get("optional")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-                {
-                    return true;
-                }
+            && entry
+                .get("optional")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        {
+            return true;
+        }
     }
     false
 }
