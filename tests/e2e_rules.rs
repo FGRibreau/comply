@@ -238,3 +238,38 @@ fn runtime_idiom_rules_are_opt_in_and_configurable() {
         "{configured}"
     );
 }
+
+/// Whether comply reports `prefer-node-protocol` on a file holding only `source`.
+fn prefer_node_protocol_fires(source: &str) -> bool {
+    let (_dir, path) = write_ts_file("imports.ts", source);
+    let output = common::comply().arg(&path).output().unwrap();
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("prefer-node-protocol")
+}
+
+#[test]
+fn prefer_node_protocol_ignores_userland_subpaths_of_builtin_names() {
+    // `punycode/x` resolves to the npm package `punycode`.
+    // Only builtin subpaths such as `fs/promises` stay builtins.
+    for source in [
+        "import punycode from 'punycode/punycode.js';\n",
+        "import punycode from 'punycode/';\n",
+        "import x from 'fs/quelconque';\n",
+        "import fs from 'node:fs';\n",
+    ] {
+        assert!(!prefer_node_protocol_fires(source), "reported: {source}");
+    }
+}
+
+#[test]
+fn prefer_node_protocol_reports_builtins_and_builtin_subpaths() {
+    for source in [
+        "import fs from 'fs';\n",
+        "import punycode from 'punycode';\n",
+        "import { readFile } from 'fs/promises';\n",
+        "const posix = require('path/posix');\n",
+    ] {
+        assert!(prefer_node_protocol_fires(source), "not reported: {source}");
+    }
+}
