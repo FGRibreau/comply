@@ -233,7 +233,11 @@ const QUOTED_RULES: usize = 5;
 fn no_tsconfig(enabled: &[&'static crate::rules::meta::RuleMeta]) -> ToolchainError {
     let named: Vec<&str> = enabled.iter().take(QUOTED_RULES).map(|m| m.id).collect();
     let hidden = enabled.len().saturating_sub(named.len());
-    let rest = if hidden > 0 { format!(", and {hidden} more") } else { String::new() };
+    let rest = if hidden > 0 {
+        format!(", and {hidden} more")
+    } else {
+        String::new()
+    };
     ToolchainError::Unusable {
         what: format!(
             "type-aware analysis found no tsconfig.json above the linted files, so the {} \

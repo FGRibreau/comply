@@ -466,19 +466,31 @@ diff --git a/x.rs b/x.rs
 
     #[test]
     fn normalise_path_strips_repo_root() {
-        let got = normalise_path(Path::new("/repo/src/f.rs"), Path::new("/repo"), Path::new("/repo"));
+        let got = normalise_path(
+            Path::new("/repo/src/f.rs"),
+            Path::new("/repo"),
+            Path::new("/repo"),
+        );
         assert_eq!(got, PathBuf::from("src/f.rs"));
     }
 
     #[test]
     fn normalise_path_leaves_unrelated_paths() {
-        let got = normalise_path(Path::new("src/f.rs"), Path::new("/repo"), Path::new("/elsewhere"));
+        let got = normalise_path(
+            Path::new("src/f.rs"),
+            Path::new("/repo"),
+            Path::new("/elsewhere"),
+        );
         assert_eq!(got, PathBuf::from("src/f.rs"));
     }
 
     #[test]
     fn normalise_path_resolves_a_path_relative_to_a_subdirectory() {
-        let got = normalise_path(Path::new("f.rs"), Path::new("/repo"), Path::new("/repo/src"));
+        let got = normalise_path(
+            Path::new("f.rs"),
+            Path::new("/repo"),
+            Path::new("/repo/src"),
+        );
         assert_eq!(got, PathBuf::from("src/f.rs"));
     }
 }

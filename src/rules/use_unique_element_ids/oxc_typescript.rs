@@ -60,7 +60,7 @@ impl OxcCheck for Check {
         for node in semantic.nodes().iter() {
             match node.kind() {
                 AstKind::JSXOpeningElement(opening) => {
-                    if jsx_element_name(&opening.name).is_some_and(&is_excluded) {
+                    if jsx_element_name(&opening.name).is_some_and(is_excluded) {
                         continue;
                     }
                     if let Some((span, value)) = static_jsx_id(opening) {
@@ -74,7 +74,7 @@ impl OxcCheck for Check {
                     if !is_react_create_element(call, &bare_create_element) {
                         continue;
                     }
-                    if create_element_name(call).is_some_and(&is_excluded) {
+                    if create_element_name(call).is_some_and(is_excluded) {
                         continue;
                     }
                     if let Some((span, value)) = literal_id_prop(call) {

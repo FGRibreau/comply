@@ -38,7 +38,11 @@ fn exit_code_one_on_violations() {
 fn cjs_file_is_linted_like_js() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("bad.cjs");
-    std::fs::write(&path, "function handleClick() { throw new Error('boom'); }\n").unwrap();
+    std::fs::write(
+        &path,
+        "function handleClick() { throw new Error('boom'); }\n",
+    )
+    .unwrap();
     common::comply()
         .arg(&path)
         .assert()

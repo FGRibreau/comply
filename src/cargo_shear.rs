@@ -102,7 +102,11 @@ const QUOTED_LINES: usize = 5;
 /// the findings it carried, if any, never reached comply.
 fn read_report(stdout: &[u8], stderr: &[u8], workspace: &Path) -> Result<ShearReport> {
     if stdout.is_empty() {
-        return Err(unusable(workspace, "reported nothing", &first_lines(stderr)));
+        return Err(unusable(
+            workspace,
+            "reported nothing",
+            &first_lines(stderr),
+        ));
     }
     serde_json::from_slice::<ShearReport>(stdout).map_err(|cause| {
         unusable(
@@ -494,7 +498,10 @@ mod tests {
     fn a_shear_run_that_reported_nothing_is_refused() {
         let ws = Path::new("/ws");
         let clean = br#"{"summary":{"errors":0,"warnings":0,"fixed":0},"findings":[]}"#;
-        assert!(read_report(clean, b"", ws).is_ok(), "a clean report stays a clean report");
+        assert!(
+            read_report(clean, b"", ws).is_ok(),
+            "a clean report stays a clean report"
+        );
         assert!(
             read_report(b"", b"error: failed to parse manifest", ws).is_err(),
             "empty stdout is a run that examined no dependency"

@@ -1029,7 +1029,11 @@ fn a_tsconfig_is_looked_up_for_every_typescript_file_not_only_the_first_file() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("package.json"), "{\"name\":\"t\"}\n").unwrap();
     fs::create_dir(dir.path().join("deploy")).unwrap();
-    fs::write(dir.path().join("deploy/render.mjs"), "export const page = 1;\n").unwrap();
+    fs::write(
+        dir.path().join("deploy/render.mjs"),
+        "export const page = 1;\n",
+    )
+    .unwrap();
     fs::create_dir(dir.path().join("frontend")).unwrap();
     fs::write(
         dir.path().join("frontend/tsconfig.json"),

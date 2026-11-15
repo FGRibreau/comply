@@ -27,7 +27,7 @@ disabled = true
 
 /// Declare in `dir` that this fixture does not want the type-aware rules.
 pub fn without_type_aware_rules(dir: &Path) {
-    fs::write(dir.join("comply.toml"), WITHOUT_TYPE_AWARE).expect("failed to write comply.toml");
+    config_without_type_aware_rules(dir, "");
 }
 
 /// Write a comply.toml of `own_config` plus that same opt-out.
