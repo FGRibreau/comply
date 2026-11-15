@@ -1294,8 +1294,11 @@ fn collect_bare_specifiers(
             if imp.source_path.is_some() || !is_bare_specifier(&imp.specifier) {
                 continue;
             }
+            if is_builtin_module(&imp.specifier) {
+                continue;
+            }
             let pkg = extract_package_name(&imp.specifier);
-            if pkg.is_empty() || is_builtin_module(&pkg) {
+            if pkg.is_empty() {
                 continue;
             }
             let entry = result.entry(pkg).or_insert(BareSpecifierInfo { type_only: true });
@@ -1319,62 +1322,15 @@ fn extract_package_name(specifier: &str) -> String {
     specifier.split('/').next().unwrap_or("").to_string()
 }
 
-fn is_builtin_module(name: &str) -> bool {
+fn is_builtin_module(specifier: &str) -> bool {
     // Cloudflare Workers runtime modules live under the `cloudflare:` protocol
     // namespace (e.g. `cloudflare:workers`, `cloudflare:sockets`). They are
     // runtime-provided built-ins, never npm packages, so the submodule name is
     // not enumerated.
-    if name.starts_with("cloudflare:") {
+    if specifier.starts_with("cloudflare:") {
         return true;
     }
-    // Node.js built-in modules — bare imports that aren't npm packages.
-    let name = name.strip_prefix("node:").unwrap_or(name);
-    matches!(
-        name,
-        "assert"
-            | "async_hooks"
-            | "buffer"
-            | "child_process"
-            | "cluster"
-            | "console"
-            | "constants"
-            | "crypto"
-            | "dgram"
-            | "diagnostics_channel"
-            | "dns"
-            | "domain"
-            | "events"
-            | "fs"
-            | "http"
-            | "http2"
-            | "https"
-            | "inspector"
-            | "module"
-            | "net"
-            | "os"
-            | "path"
-            | "perf_hooks"
-            | "process"
-            | "punycode"
-            | "querystring"
-            | "readline"
-            | "repl"
-            | "stream"
-            | "string_decoder"
-            | "sys"
-            | "test"
-            | "timers"
-            | "tls"
-            | "trace_events"
-            | "tty"
-            | "url"
-            | "util"
-            | "v8"
-            | "vm"
-            | "wasi"
-            | "worker_threads"
-            | "zlib"
-    )
+    crate::node_builtins::is_node_builtin(specifier)
 }
 
 fn is_indexable(lang: Language) -> bool {
@@ -3811,8 +3767,11 @@ pub fn declaration_file_dependency_specifiers(path: &Path) -> FxHashSet<String> 
             if !is_bare_specifier(specifier) {
                 return;
             }
+            if is_builtin_module(specifier) {
+                return;
+            }
             let pkg = extract_package_name(specifier);
-            if !pkg.is_empty() && !is_builtin_module(&pkg) {
+            if !pkg.is_empty() {
                 found.insert(pkg);
             }
         };

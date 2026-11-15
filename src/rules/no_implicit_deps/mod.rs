@@ -38,51 +38,6 @@ pub fn register() -> RuleDef {
 
 // ── shared helpers (used by both tree-sitter and oxc backends) ──────
 
-const NODE_BUILTINS: &[&str] = &[
-    "assert",
-    "async_hooks",
-    "buffer",
-    "child_process",
-    "cluster",
-    "console",
-    "constants",
-    "crypto",
-    "dgram",
-    "diagnostics_channel",
-    "dns",
-    "domain",
-    "events",
-    "fs",
-    "http",
-    "http2",
-    "https",
-    "inspector",
-    "module",
-    "net",
-    "os",
-    "path",
-    "perf_hooks",
-    "process",
-    "punycode",
-    "querystring",
-    "readline",
-    "repl",
-    "stream",
-    "string_decoder",
-    "sys",
-    "timers",
-    "tls",
-    "trace_events",
-    "tty",
-    "url",
-    "util",
-    "v8",
-    "vm",
-    "wasi",
-    "worker_threads",
-    "zlib",
-];
-
 const RUNTIME_BUILTINS: &[&str] = &["k6", "bun", "deno"];
 
 pub(super) fn is_node_builtin(specifier: &str) -> bool {
@@ -96,8 +51,9 @@ pub(super) fn is_node_builtin(specifier: &str) -> bool {
     if let Some(rest) = specifier.strip_prefix("bun:") {
         return !rest.is_empty();
     }
+    // Runtime modules keep their subpaths (`k6/http`).
     let root = specifier.split('/').next().unwrap_or(specifier);
-    NODE_BUILTINS.contains(&root) || RUNTIME_BUILTINS.contains(&root)
+    crate::node_builtins::is_node_builtin(specifier) || RUNTIME_BUILTINS.contains(&root)
 }
 
 const VIRTUAL_PREFIXES: &[&str] = &[

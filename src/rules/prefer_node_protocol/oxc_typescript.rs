@@ -6,66 +6,8 @@ use crate::rules::backend::{AstKind, AstType, CheckCtx, OxcCheck};
 use oxc_ast::ast::Expression;
 use std::sync::Arc;
 
-/// Node.js builtins that accept the `node:` prefix.
-///
-/// A subpath under a builtin name is an npm package.
-/// Only the subpaths Node ships are listed.
-/// Source: `require('node:module').builtinModules`.
-const NODE_BUILTINS: &[&str] = &[
-    "assert",
-    "assert/strict",
-    "buffer",
-    "child_process",
-    "cluster",
-    "console",
-    "constants",
-    "crypto",
-    "dgram",
-    "dns",
-    "dns/promises",
-    "domain",
-    "events",
-    "fs",
-    "fs/promises",
-    "http",
-    "http2",
-    "https",
-    "module",
-    "net",
-    "os",
-    "path",
-    "path/posix",
-    "path/win32",
-    "perf_hooks",
-    "process",
-    "punycode",
-    "querystring",
-    "readline",
-    "readline/promises",
-    "repl",
-    "stream",
-    "stream/consumers",
-    "stream/promises",
-    "stream/web",
-    "string_decoder",
-    "sys",
-    "timers",
-    "timers/promises",
-    "tls",
-    "trace_events",
-    "tty",
-    "url",
-    "util",
-    "util/types",
-    "v8",
-    "vm",
-    "wasi",
-    "worker_threads",
-    "zlib",
-];
-
 fn is_bare_builtin(specifier: &str) -> bool {
-    NODE_BUILTINS.contains(&specifier)
+    !specifier.starts_with("node:") && crate::node_builtins::is_node_builtin(specifier)
 }
 
 fn strip_quotes(s: &str) -> &str {

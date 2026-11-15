@@ -33,6 +33,7 @@ mod icu;
 mod ignore_comments;
 mod list;
 mod lsp;
+mod node_builtins;
 mod output;
 mod oxc_helpers;
 mod oxlint;

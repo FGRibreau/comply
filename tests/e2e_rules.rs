@@ -273,3 +273,74 @@ fn prefer_node_protocol_reports_builtins_and_builtin_subpaths() {
         assert!(prefer_node_protocol_fires(source), "not reported: {source}");
     }
 }
+
+/// Stdout of both manifest rules on a fixture project.
+fn manifest_rules_stdout(dependencies: &str, files: &[(&str, &str)]) -> String {
+    let dir = tempfile::TempDir::new().unwrap();
+    common::without_type_aware_rules(dir.path());
+    let manifest =
+        format!(r#"{{"name":"app","version":"1.0.0","dependencies":{{{dependencies}}}}}"#);
+    std::fs::write(dir.path().join("package.json"), manifest).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    for (name, source) in files {
+        std::fs::write(dir.path().join("src").join(name), source).unwrap();
+    }
+    let output = common::comply()
+        .arg("rules")
+        .arg("unused-dependency,no-implicit-deps")
+        .arg(dir.path())
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn a_userland_subpath_of_a_builtin_name_uses_its_declared_package() {
+    let stdout = manifest_rules_stdout(
+        r#""punycode":"2.3.1","left-pad":"1.3.0""#,
+        &[("utils.ts", "import punycode from 'punycode/punycode.js';\n")],
+    );
+    // The unimported `left-pad` proves the rule ran on this fixture.
+    assert!(stdout.contains("`left-pad` is declared"), "{stdout}");
+    assert!(!stdout.contains("`punycode` is declared"), "{stdout}");
+}
+
+#[test]
+fn a_declaration_file_importing_a_userland_subpath_uses_its_package() {
+    let stdout = manifest_rules_stdout(
+        r#""punycode":"2.3.1","left-pad":"1.3.0""#,
+        &[
+            ("index.ts", "export const answer = 42;\n"),
+            (
+                "types.d.ts",
+                "export type { ucs2 } from 'punycode/punycode.js';\n",
+            ),
+        ],
+    );
+    assert!(stdout.contains("`left-pad` is declared"), "{stdout}");
+    assert!(!stdout.contains("`punycode` is declared"), "{stdout}");
+}
+
+#[test]
+fn an_undeclared_userland_subpath_of_a_builtin_name_is_an_implicit_dependency() {
+    let stdout = manifest_rules_stdout(
+        "",
+        &[("utils.ts", "import punycode from 'punycode/punycode.js';\n")],
+    );
+    let reported = stdout
+        .lines()
+        .any(|line| line.contains("no-implicit-deps") && line.contains("punycode"));
+    assert!(reported, "{stdout}");
+}
+
+#[test]
+fn a_builtin_subpath_needs_no_declared_dependency() {
+    let stdout = manifest_rules_stdout(
+        "",
+        &[(
+            "utils.ts",
+            "import { readFile } from 'fs/promises';\nimport { join } from 'node:path/posix';\n",
+        )],
+    );
+    assert!(!stdout.contains("no-implicit-deps"), "{stdout}");
+}
