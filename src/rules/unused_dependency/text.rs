@@ -23,15 +23,22 @@
 //!     `plugins`, PostCSS, …). These tools resolve their dependencies from
 //!     config strings, not `import` statements, so the import index never
 //!     sees them.
+//!   - Required peers of a declared, installed dependency.
+//!     The project must declare them, imported or not.
 //!
 //! Only inspects `dependencies` (production). `devDependencies`,
 //! `peerDependencies`, and `optionalDependencies` are out of scope — they
 //! have legitimate non-import use cases (CI scripts, type-only consumers,
 //! optional native bindings).
 
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
+
 use rustc_hash::FxHashSet;
 
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::project::PackageJson;
 use crate::rules::backend::{CheckCtx, TextCheck};
 use crate::rules::path_utils::is_config_file;
 
@@ -93,6 +100,12 @@ impl TextCheck for Check {
             .as_deref()
             .map(dts_dependency_refs)
             .unwrap_or_default();
+        let required_peers = ctx
+            .project
+            .project_root
+            .as_deref()
+            .map(|root| required_peer_names(root, pkg))
+            .unwrap_or_default();
         for dep in pkg.dependencies.keys() {
             if is_skipped(dep, &extra_tooling) {
                 continue;
@@ -107,6 +120,10 @@ impl TextCheck for Check {
             // so the bare-specifier scan never sees these references — the
             // dedicated `.d.ts` scan does.
             if dts_refs.contains(dep) {
+                continue;
+            }
+            // Another declared dependency requires it as a peer.
+            if required_peers.contains(dep) {
                 continue;
             }
             // A CLI-runner package (`@changesets/cli`) is run via a `scripts`
@@ -146,6 +163,71 @@ fn is_skipped(dep: &str, extra_tooling: &FxHashSet<&str>) -> bool {
         return true;
     }
     extra_tooling.contains(dep)
+}
+
+/// Most installed manifests read when collecting required peers.
+const MAX_PEER_MANIFESTS: usize = 4096;
+
+/// Largest installed `package.json` read, in bytes.
+const MAX_PEER_MANIFEST_BYTES: u64 = 1024 * 1024;
+
+/// Peers required by the declared dependencies installed under `root`.
+///
+/// A peer marked `peerDependenciesMeta.<name>.optional` is not required.
+/// Each manifest is found as Node does, from `root` upward.
+fn required_peer_names(root: &Path, pkg: &PackageJson) -> FxHashSet<String> {
+    let declared = pkg
+        .dependencies
+        .keys()
+        .chain(pkg.dev_dependencies.keys())
+        .chain(pkg.optional_dependencies.keys());
+    declared
+        .take(MAX_PEER_MANIFESTS)
+        .filter_map(|dep| installed_manifest(root, dep))
+        .flat_map(|manifest| required_peers_of(&manifest))
+        .collect()
+}
+
+/// Names in `manifest.peerDependencies` not marked optional.
+fn required_peers_of(manifest: &serde_json::Value) -> Vec<String> {
+    let Some(peers) = manifest
+        .get("peerDependencies")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Vec::new();
+    };
+    let meta = manifest.get("peerDependenciesMeta");
+    let is_optional = |name: &str| {
+        meta.and_then(|entries| entries.get(name))
+            .and_then(|entry| entry.get("optional"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    };
+    peers
+        .keys()
+        .filter(|name| !is_optional(name))
+        .cloned()
+        .collect()
+}
+
+/// `node_modules/<dep>/package.json` nearest to `root`, parsed.
+/// `None` when absent, unreadable, too large or not JSON.
+fn installed_manifest(root: &Path, dep: &str) -> Option<serde_json::Value> {
+    let path = root
+        .ancestors()
+        .map(|dir| dir.join("node_modules").join(dep).join("package.json"))
+        .find(|candidate| candidate.is_file())?;
+    let mut raw = String::new();
+    File::open(path)
+        .ok()?
+        .take(MAX_PEER_MANIFEST_BYTES + 1)
+        .read_to_string(&mut raw)
+        .ok()?;
+    let within_cap = u64::try_from(raw.len()).is_ok_and(|len| len <= MAX_PEER_MANIFEST_BYTES);
+    if !within_cap {
+        return None;
+    }
+    serde_json::from_str(&raw).ok()
 }
 
 /// Package names referenced by the project's `.d.ts` declaration files —

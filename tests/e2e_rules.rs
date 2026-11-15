@@ -281,9 +281,10 @@ fn manifest_rules_stdout(dependencies: &str, files: &[(&str, &str)]) -> String {
     let manifest =
         format!(r#"{{"name":"app","version":"1.0.0","dependencies":{{{dependencies}}}}}"#);
     std::fs::write(dir.path().join("package.json"), manifest).unwrap();
-    std::fs::create_dir(dir.path().join("src")).unwrap();
-    for (name, source) in files {
-        std::fs::write(dir.path().join("src").join(name), source).unwrap();
+    for (relative, source) in files {
+        let path = dir.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, source).unwrap();
     }
     let output = common::comply()
         .arg("rules")
@@ -298,7 +299,10 @@ fn manifest_rules_stdout(dependencies: &str, files: &[(&str, &str)]) -> String {
 fn a_userland_subpath_of_a_builtin_name_uses_its_declared_package() {
     let stdout = manifest_rules_stdout(
         r#""punycode":"2.3.1","left-pad":"1.3.0""#,
-        &[("utils.ts", "import punycode from 'punycode/punycode.js';\n")],
+        &[(
+            "src/utils.ts",
+            "import punycode from 'punycode/punycode.js';\n",
+        )],
     );
     // The unimported `left-pad` proves the rule ran on this fixture.
     assert!(stdout.contains("`left-pad` is declared"), "{stdout}");
@@ -310,9 +314,9 @@ fn a_declaration_file_importing_a_userland_subpath_uses_its_package() {
     let stdout = manifest_rules_stdout(
         r#""punycode":"2.3.1","left-pad":"1.3.0""#,
         &[
-            ("index.ts", "export const answer = 42;\n"),
+            ("src/index.ts", "export const answer = 42;\n"),
             (
-                "types.d.ts",
+                "src/types.d.ts",
                 "export type { ucs2 } from 'punycode/punycode.js';\n",
             ),
         ],
@@ -325,7 +329,10 @@ fn a_declaration_file_importing_a_userland_subpath_uses_its_package() {
 fn an_undeclared_userland_subpath_of_a_builtin_name_is_an_implicit_dependency() {
     let stdout = manifest_rules_stdout(
         "",
-        &[("utils.ts", "import punycode from 'punycode/punycode.js';\n")],
+        &[(
+            "src/utils.ts",
+            "import punycode from 'punycode/punycode.js';\n",
+        )],
     );
     let reported = stdout
         .lines()
@@ -338,9 +345,41 @@ fn a_builtin_subpath_needs_no_declared_dependency() {
     let stdout = manifest_rules_stdout(
         "",
         &[(
-            "utils.ts",
+            "src/utils.ts",
             "import { readFile } from 'fs/promises';\nimport { join } from 'node:path/posix';\n",
         )],
     );
     assert!(!stdout.contains("no-implicit-deps"), "{stdout}");
+}
+
+/// `@chakra-ui/react` requires `@emotion/react` and makes `framer-motion` optional.
+const CHAKRA_MANIFEST: &str = r#"{
+  "name": "@chakra-ui/react",
+  "version": "2.10.9",
+  "peerDependencies": { "@emotion/react": ">=11", "framer-motion": ">=4" },
+  "peerDependenciesMeta": { "framer-motion": { "optional": true } }
+}"#;
+
+#[test]
+fn a_required_peer_of_an_installed_dependency_is_not_unused() {
+    let stdout = manifest_rules_stdout(
+        r#""@chakra-ui/react":"2.10.9","@emotion/react":"11.14.0","framer-motion":"11.0.0","left-pad":"1.3.0""#,
+        &[
+            (
+                "src/index.ts",
+                "import { Box } from '@chakra-ui/react';\nexport { Box };\n",
+            ),
+            (
+                "node_modules/@chakra-ui/react/package.json",
+                CHAKRA_MANIFEST,
+            ),
+        ],
+    );
+    assert!(stdout.contains("`left-pad` is declared"), "{stdout}");
+    assert!(stdout.contains("`framer-motion` is declared"), "{stdout}");
+    assert!(!stdout.contains("`@emotion/react` is declared"), "{stdout}");
+    assert!(
+        !stdout.contains("`@chakra-ui/react` is declared"),
+        "{stdout}"
+    );
 }
