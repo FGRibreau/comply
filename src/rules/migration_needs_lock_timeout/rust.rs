@@ -166,6 +166,18 @@ mod tests {
     }
 
     #[test]
+    fn skips_concurrent_index_build_string() {
+        let src = r#"fn f() { let m = "CREATE INDEX CONCURRENTLY idx ON users (age) -- speeds up age lookups"; }"#;
+        assert!(run(src).is_empty());
+    }
+
+    #[test]
+    fn flags_blocking_ddl_next_to_concurrent_build_string() {
+        let src = r#"fn f() { let m = "ALTER TABLE t ADD COLUMN y INT; CREATE INDEX CONCURRENTLY a ON t (x) -- speeds up x lookups"; }"#;
+        assert_eq!(run(src).len(), 1);
+    }
+
+    #[test]
     fn skips_clickhouse_alter_with_type_wrapper_issue_7765() {
         // ClickHouse ALTER TABLE with a Nullable(DateTime64(...)) column type:
         // `SET lock_timeout` is not a valid ClickHouse setting.
