@@ -3516,19 +3516,17 @@ impl ProjectCtx {
     /// smallest path among the files being linted. In full-scan mode this
     /// equals `indexed_paths().min()`; in diff mode it restricts to the
     /// changed files so the diagnostic is actually emitted.
+    /// Only TS-family files qualify: every anchored rule runs on them alone.
     pub fn anchor_path(&self) -> Option<PathBuf> {
         self.anchor_path_cache
             .get_or_init(|| {
                 if let Some(linted) = self.linted_paths.get() {
-                    // Exclude import-index-only languages (Markdown / HTML):
-                    // they are dispatched to no lint engine, so a
-                    // once-per-project rule anchored on one would never run. The
-                    // full-scan branch's `min_indexed_path` already filters these.
+                    // Same filter as the full-scan `min_indexed_path`.
                     linted
                         .iter()
                         .filter(|p| {
-                            !crate::files::Language::from_path(p.as_path())
-                                .is_some_and(crate::files::Language::is_import_index_only)
+                            crate::files::Language::from_path(p.as_path())
+                                .is_some_and(crate::files::Language::is_typescript_family)
                         })
                         .min()
                         .cloned()
