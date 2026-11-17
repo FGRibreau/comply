@@ -217,9 +217,12 @@ fn describes_sensitive_value(name: &str) -> bool {
 }
 
 /// True when some identifier under `node` describes a sensitive value.
+/// A boolean name counts too: `key.is_some()` logs no key.
 fn has_describing_identifier(node: tree_sitter::Node, source: &[u8]) -> bool {
     if matches!(node.kind(), "identifier" | "field_identifier") {
-        return node.utf8_text(source).is_ok_and(describes_sensitive_value);
+        return node
+            .utf8_text(source)
+            .is_ok_and(|name| is_boolean_name(name) || describes_sensitive_value(name));
     }
     let mut cursor = node.walk();
     node.children(&mut cursor)
@@ -515,6 +518,19 @@ mod tests {
         ] {
             assert_eq!(run_on(src).len(), 1, "{src}");
         }
+    }
+
+    // `.is_some()` logs whether the key is set, never the key.
+    #[test]
+    fn allows_secret_label_with_boolean_value() {
+        assert!(
+            run_on(
+                r#"fn f(&self) {
+                tracing::warn!(stripe_secret_key = self.config.stripe_secret_key.is_some(), "x");
+            }"#
+            )
+            .is_empty()
+        );
     }
 
     // An id can be the credential itself: Vault AppRole `secret_id`.
