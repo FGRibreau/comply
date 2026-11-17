@@ -48,7 +48,9 @@ const BOOLEAN_PREFIXES: &[&str] = &[
 /// (e.g. a filesystem path, directory name, or container) rather than the
 /// secret value itself. `token_path` is a file path; `credential_dir` is a
 /// directory — neither leaks a credential.
-const METADATA_SUFFIXES: &[&str] = &["_path", "_dir", "_file", "_store", "_cache"];
+/// `secret_name` names a Kubernetes Secret object, never its data.
+/// `_id` stays out: Vault's AppRole `secret_id` is a credential.
+const METADATA_SUFFIXES: &[&str] = &["_path", "_dir", "_file", "_store", "_cache", "_name"];
 
 /// Word segments that mark an identifier as describing a count, position, or
 /// category *about* a secret-named value rather than the value itself. In a
@@ -202,6 +204,52 @@ fn has_sensitive_identifier(node: tree_sitter::Node, source: &[u8]) -> bool {
     false
 }
 
+/// True when `name` holds a sensitive word but describes it.
+/// Examples: `secret_name`, `token_index`, `is_token_valid`, `MAX_TOKEN_LEN`.
+fn describes_sensitive_value(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let sensitive = SENSITIVE_WORDS.iter().any(|w| lower.contains(w));
+    let descriptive = is_boolean_name(name)
+        || is_const_name(name)
+        || is_metadata_only(name)
+        || is_metadata_qualified(name);
+    sensitive && descriptive
+}
+
+/// True when some identifier under `node` describes a sensitive value.
+fn has_describing_identifier(node: tree_sitter::Node, source: &[u8]) -> bool {
+    if matches!(node.kind(), "identifier" | "field_identifier") {
+        return node.utf8_text(source).is_ok_and(describes_sensitive_value);
+    }
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .any(|child| has_describing_identifier(child, source))
+}
+
+/// Judges each macro argument alone.
+/// In `label = value`, the value is judged first.
+/// A metadata value excuses the label: `secret = %self.secret_name`.
+/// A neutral one does not: `api_key = %key`.
+fn has_sensitive_argument(token_tree: tree_sitter::Node, source: &[u8]) -> bool {
+    let mut cursor = token_tree.walk();
+    let tokens: Vec<tree_sitter::Node> = token_tree.children(&mut cursor).collect();
+    let inner = tokens
+        .get(1..tokens.len().saturating_sub(1))
+        .unwrap_or_default();
+    inner
+        .split(|t| t.kind() == ",")
+        .any(|argument| match argument {
+            [label, equals, value @ ..] if label.kind() == "identifier" && equals.kind() == "=" => {
+                value.iter().any(|v| has_sensitive_identifier(*v, source))
+                    || (has_sensitive_identifier(*label, source)
+                        && !value.iter().any(|v| has_describing_identifier(*v, source)))
+            }
+            _ => argument
+                .iter()
+                .any(|t| has_sensitive_identifier(*t, source)),
+        })
+}
+
 crate::ast_check! { on ["macro_invocation"] => |node, source, ctx, diagnostics|
     if crate::rules::rust_helpers::is_test_code(node, source, ctx) {
         return;
@@ -220,7 +268,7 @@ crate::ast_check! { on ["macro_invocation"] => |node, source, ctx, diagnostics|
         return;
     };
 
-    if !has_sensitive_identifier(token_tree, source) {
+    if !has_sensitive_argument(token_tree, source) {
         return;
     }
 
@@ -433,6 +481,47 @@ mod tests {
         // `auth_token` does not have a metadata suffix after the sensitive word
         assert_eq!(
             run_on(r#"fn f() { debug!("auth: {}", auth_token); }"#).len(),
+            1
+        );
+    }
+
+    // A Kubernetes Secret's object name is not confidential.
+    // The label names the subject; the value is its name.
+    #[test]
+    fn allows_secret_label_with_secret_name_value() {
+        assert!(
+            run_on(
+                r#"
+            fn f(&self) {
+                tracing::info!(namespace = %ns, secret = %self.secret_name, "secret updated");
+                tracing::warn!(secret = ?secret_name, "secret already gone");
+                info!("deleted {}", secret_name);
+            }
+        "#
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn still_flags_secret_label_without_metadata_value() {
+        for src in [
+            r#"fn f() { tracing::info!(secret = %secret_value, "x"); }"#,
+            r#"fn f() { tracing::info!(api_key = %key, "x"); }"#,
+            r#"fn f() { tracing::info!(secret = %self.value, "x"); }"#,
+            r#"fn f() { tracing::info!(password, "x"); }"#,
+            r#"fn f() { tracing::info!(name = %secret_name, token = %token, "x"); }"#,
+            r#"fn f() { tracing::info!(secret_name = %secret_name, password = %pw, "x"); }"#,
+        ] {
+            assert_eq!(run_on(src).len(), 1, "{src}");
+        }
+    }
+
+    // An id can be the credential itself: Vault AppRole `secret_id`.
+    #[test]
+    fn still_flags_secret_id_value() {
+        assert_eq!(
+            run_on(r#"fn f() { tracing::info!(secret = %secret_id, "x"); }"#).len(),
             1
         );
     }
