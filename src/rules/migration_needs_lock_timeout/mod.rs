@@ -11,6 +11,11 @@
 //!
 //! `SET lock_timeout` is a PostgreSQL setting, so a file whose SQL is
 //! ClickHouse DDL (`is_clickhouse_ddl`) is skipped entirely.
+//!
+//! A concurrent index build or drop blocks no write.
+//! It takes `SHARE UPDATE EXCLUSIVE`, so no queue forms.
+//! It refuses a transaction, so no `SET` precedes it.
+//! Only the other DDL statements need a lock timeout.
 
 mod oxc_typescript;
 mod rust;
@@ -21,7 +26,7 @@ use crate::files::Language;
 use crate::rules::RuleDef;
 use crate::rules::backend::Backend;
 use crate::rules::meta::RuleMeta;
-use crate::rules::sql_helpers::{contains_complete_ddl_statement, contains_word};
+use crate::rules::sql_helpers::{contains_blocking_ddl_statement, contains_word};
 
 pub const META: RuleMeta = RuleMeta {
     id: "migration-needs-lock-timeout",
@@ -54,7 +59,7 @@ pub fn register() -> RuleDef {
 /// only the keyword prefix and have nowhere to attach a lock timeout,
 /// are not flagged.
 pub(super) fn contains_ddl(text: &str) -> bool {
-    contains_complete_ddl_statement(text)
+    contains_blocking_ddl_statement(text)
 }
 
 pub(super) fn declares_lock_timeout(text: &str) -> bool {

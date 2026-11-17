@@ -81,6 +81,45 @@ mod tests {
         assert!(diags.is_empty());
     }
 
+    // A `-- no-transaction` file holding one concurrent index build.
+    // sqlx sends it as one simple query.
+    // A `SET` in front opens a transaction, which `CONCURRENTLY` refuses.
+    const CONCURRENT_BUILD: &str = "-- no-transaction.\n\
+        -- atlas:txmode none\n\n\
+        -- A failed build leaves it INVALID. The next file repairs it.\n\
+        CREATE INDEX CONCURRENTLY IF NOT EXISTS \"idx_execution_clear\"\n  \
+        ON \"workflow\".\"execution\" (\"execution_id\")\n  \
+        WHERE jsonb_typeof(definition->'secret_data') = 'object';";
+
+    #[test]
+    fn skips_file_with_only_a_concurrent_index_build() {
+        assert!(run("/app/migrations/20261117120000_index.sql", CONCURRENT_BUILD).is_empty());
+    }
+
+    #[test]
+    fn skips_concurrent_drop_and_reindex() {
+        for src in [
+            "-- no-transaction.\nDROP INDEX CONCURRENTLY IF EXISTS \"invitations_one_accepted_idx\";",
+            "-- no-transaction.\nREINDEX INDEX CONCURRENTLY \"workflow\".\"idx_clear\";",
+            "CREATE INDEX CONCURRENTLY a ON t (x); -- speeds up x lookups\nDROP INDEX CONCURRENTLY b;",
+        ] {
+            assert!(run("/app/migrations/002.sql", src).is_empty(), "{src}");
+        }
+    }
+
+    #[test]
+    fn flags_blocking_ddl_next_to_a_concurrent_build() {
+        for src in [
+            "CREATE INDEX CONCURRENTLY a ON t (x); -- speeds up x lookups\nALTER TABLE t ADD COLUMN y INT;",
+            "CREATE INDEX CONCURRENTLY a ON t (x); -- speeds up x lookups\nCREATE INDEX b ON t (y); -- speeds up y lookups",
+            "DROP INDEX CONCURRENTLY a;\nDROP INDEX b;",
+            "-- built concurrently by the next file\nCREATE INDEX b ON t (y);",
+            "/* concurrently */ CREATE INDEX b ON t (y); -- speeds up y lookups",
+        ] {
+            assert_eq!(run("/app/migrations/003.sql", src).len(), 1, "{src}");
+        }
+    }
+
     #[test]
     fn skips_clickhouse_migration_issue_7765() {
         let diags = run(

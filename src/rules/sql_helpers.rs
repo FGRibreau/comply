@@ -382,15 +382,18 @@ const DDL_STATEMENT_SHAPES: &[(&str, &str)] = &[
 /// keyword, immediately followed by at least one more word (the target).
 /// Adjacency rejects English prose, and requiring the trailing target
 /// rejects builder fragments.
-pub fn contains_complete_ddl_statement(text: &str) -> bool {
+///
+/// `CREATE INDEX CONCURRENTLY` and `DROP INDEX CONCURRENTLY` block no write.
+/// They are skipped.
+pub fn contains_blocking_ddl_statement(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let words: Vec<&str> = lower
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
         .collect();
-    DDL_STATEMENT_SHAPES
-        .iter()
-        .any(|(verb, object)| words.windows(3).any(|w| w[0] == *verb && w[1] == *object))
+    words.windows(3).any(|w| {
+        DDL_STATEMENT_SHAPES.contains(&(w[0], w[1])) && !(w[1] == "index" && w[2] == "concurrently")
+    })
 }
 
 /// Returns true if `lower_text` (already lowercase) contains `word`
@@ -809,14 +812,14 @@ mod tests {
 
     #[test]
     fn complete_ddl_statement_accepts_full_alter_table() {
-        assert!(contains_complete_ddl_statement(
+        assert!(contains_blocking_ddl_statement(
             "ALTER TABLE users ADD COLUMN age INT"
         ));
-        assert!(contains_complete_ddl_statement(
+        assert!(contains_blocking_ddl_statement(
             "CREATE INDEX idx_users_age ON users(age)"
         ));
-        assert!(contains_complete_ddl_statement("DROP INDEX idx_users_age"));
-        assert!(contains_complete_ddl_statement(
+        assert!(contains_blocking_ddl_statement("DROP INDEX idx_users_age"));
+        assert!(contains_blocking_ddl_statement(
             "ALTER TABLE users ADD CONSTRAINT fk FOREIGN KEY (id)"
         ));
     }
@@ -825,11 +828,11 @@ mod tests {
     fn complete_ddl_statement_rejects_builder_fragments_issue_1498() {
         // diesel diff_schema.rs query-builder fragments: the keyword prefix
         // is pushed alone, with no target name — not a standalone statement.
-        assert!(!contains_complete_ddl_statement("ALTER TABLE "));
-        assert!(!contains_complete_ddl_statement(" ADD COLUMN "));
-        assert!(!contains_complete_ddl_statement(" DROP COLUMN "));
-        assert!(!contains_complete_ddl_statement(" ADD CONSTRAINT "));
-        assert!(!contains_complete_ddl_statement("CREATE INDEX "));
+        assert!(!contains_blocking_ddl_statement("ALTER TABLE "));
+        assert!(!contains_blocking_ddl_statement(" ADD COLUMN "));
+        assert!(!contains_blocking_ddl_statement(" DROP COLUMN "));
+        assert!(!contains_blocking_ddl_statement(" ADD CONSTRAINT "));
+        assert!(!contains_blocking_ddl_statement("CREATE INDEX "));
     }
 
     #[test]
