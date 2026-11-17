@@ -345,9 +345,9 @@ pub struct ImportIndex {
     /// reverse edge of `imports` so `get_importers` / `importer_count` are
     /// O(1) lookups rather than a full scan of every file's imports.
     importers: FxHashMap<PathBuf, Vec<PathBuf>>,
-    /// Lexicographically smallest indexed (canonical) path, or `None` when no
-    /// file was indexed. Once-per-project rules anchor on this; precomputing it
-    /// avoids an O(N) `indexed_paths().min()` scan on every file.
+    /// Smallest indexed canonical TS-family path, or `None`.
+    /// Once-per-project rules anchor on it.
+    /// Precomputing it avoids an O(N) scan on every file.
     min_indexed: Option<PathBuf>,
     /// Canonical paths reached by at least one namespace import
     /// (`import * as ns from './m'`). `dead-export` treats every export of such
@@ -727,13 +727,12 @@ impl ImportIndex {
         // Object.keys(x).forEach(...)` global-registration pattern.
         propagate_namespace_imports_through_star_edges(&mut namespace_imported, &star_edges);
 
-        // Anchor candidates exclude import-index-only languages (Markdown /
-        // HTML): they are indexed for their imports but dispatched to no
-        // lint engine, so a once-per-project rule anchored on one would never run.
+        // Every once-per-project rule runs on TS-family files only.
+        // An anchor in another language would silence them all.
         let min_indexed = exports
             .keys()
             .filter(|p| {
-                !Language::from_path(p.as_path()).is_some_and(Language::is_import_index_only)
+                Language::from_path(p.as_path()).is_some_and(Language::is_typescript_family)
             })
             .min()
             .cloned();
@@ -894,11 +893,9 @@ impl ImportIndex {
         self.exports.len()
     }
 
-    /// Lexicographically smallest indexed (canonical) path among languages that
-    /// are dispatched to a lint engine — import-index-only Markdown/HTML are
-    /// excluded (see [`Language::is_import_index_only`]). Precomputed once;
-    /// cross-file rules use it as a deterministic per-run anchor, so it must be a
-    /// file some engine actually visits.
+    /// Smallest indexed canonical TS-family path.
+    /// Cross-file rules use it as a deterministic per-run anchor.
+    /// Every such rule runs on TS-family files only.
     #[must_use]
     pub fn min_indexed_path(&self) -> Option<&Path> {
         self.min_indexed.as_deref()

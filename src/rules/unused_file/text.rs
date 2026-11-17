@@ -2113,8 +2113,10 @@ mod tests {
             ("proto/src/lib.rs", "pub mod v1;\n"),
             ("proto/src/v1/mod.rs", "pub mod message;\n"),
             ("proto/src/v1/message.rs", "pub struct Message;\n"),
+            // The engine runs this rule on TS-family files only.
+            ("vite.config.ts", "export default {};\n"),
         ];
-        let (_dir, diags) = run_on_project(&files);
+        let (_dir, diags) = run_dispatched(&files);
         assert!(
             diags.is_empty(),
             "lib.rs (crate root), build.rs (build script), and mod-included \
@@ -2135,8 +2137,10 @@ mod tests {
             ("proto/src/lib.rs", "pub mod v1;\n"),
             ("proto/src/v1/mod.rs", "pub struct V1;\n"),
             ("proto/src/dead.rs", "pub struct Dead;\n"),
+            // A TS entry file lets the rule run here.
+            ("vite.config.ts", "export default {};\n"),
         ];
-        let (_dir, diags) = run_on_project(&files);
+        let (_dir, diags) = run_dispatched(&files);
         assert_eq!(diags.len(), 1, "expected one unused-file diagnostic: {diags:?}");
         assert!(
             diags[0].path.to_str().unwrap().contains("dead.rs"),

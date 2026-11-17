@@ -76,8 +76,14 @@
 //! Runs once per project, anchored on the lexicographically smallest indexed
 //! path so that a single pass emits all diagnostics deterministically. Barrel
 //! paths in the message are shown relative to the project root.
+//!
+//! Only TS-family files count as barrels.
+//! The import index also records Rust `pub use` items.
+//! A Cargo crate is a namespace: `auth::Error` and `spicedb::Error` differ.
+//! A crate-internal prelude re-exporting a type is idiomatic Rust.
 
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::files::Language;
 use crate::project::import_index::ExportKind;
 use crate::rules::backend::{CheckCtx, TextCheck};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -115,7 +121,10 @@ impl TextCheck for Check {
         // simulate a consumer (the bundle-size measurement shape), so they add no
         // ambiguous source-import path and are dropped before counting.
         let mut build_output_reexports: FxHashSet<(PathBuf, String)> = FxHashSet::default();
-        for (path, exports) in index.iter_exports() {
+        let barrels = index.iter_exports().filter(|(path, _)| {
+            Language::from_path(path).is_some_and(Language::is_typescript_family)
+        });
+        for (path, exports) in barrels {
             for export in exports {
                 if !matches!(export.kind, ExportKind::ReExport) {
                     continue;
@@ -652,6 +661,15 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_on_project(files: &[(&str, &str)], target_rel: &str) -> (TempDir, Vec<Diagnostic>) {
+        run_on_partial_scan(files, target_rel, &[])
+    }
+
+    /// `linted_rel` lists the scanned files; empty means a full scan.
+    fn run_on_partial_scan(
+        files: &[(&str, &str)],
+        target_rel: &str,
+        linted_rel: &[&str],
+    ) -> (TempDir, Vec<Diagnostic>) {
         let dir = TempDir::new().unwrap();
         let mut source_files: Vec<SourceFile> = Vec::new();
         for (rel, content) in files {
@@ -669,6 +687,13 @@ mod tests {
         let refs: Vec<&SourceFile> = source_files.iter().collect();
         let config = Config::default();
         let project = ProjectCtx::load(&refs, &config);
+        if !linted_rel.is_empty() {
+            let linted = linted_rel
+                .iter()
+                .map(|rel| fs::canonicalize(dir.path().join(rel)).unwrap())
+                .collect();
+            project.set_linted_paths(linted);
+        }
 
         let target_path: PathBuf = dir.path().join(target_rel);
         let source = fs::read_to_string(&target_path).unwrap();
@@ -1439,5 +1464,50 @@ mod tests {
             diags
         );
         assert!(diags[0].message.contains("ActivityIcon"));
+    }
+
+    /// Three Cargo crates each re-export their own `Error` from `lib.rs`.
+    /// A crate is a namespace: `auth::Error` and `spicedb::Error` differ.
+    #[test]
+    fn ignores_rust_crate_reexports() {
+        let files: Vec<(&str, &str)> = vec![
+            ("console/app.ts", "export const app = 1;"),
+            ("controlplane/auth/src/error.rs", "pub struct Error;"),
+            (
+                "controlplane/auth/src/lib.rs",
+                "mod error;\npub use error::Error;",
+            ),
+            ("controlplane/frn-core/src/error.rs", "pub struct Error;"),
+            (
+                "controlplane/frn-core/src/lib.rs",
+                "mod error;\npub use error::Error;",
+            ),
+            ("controlplane/spicedb/src/error.rs", "pub struct Error;"),
+            (
+                "controlplane/spicedb/src/lib.rs",
+                "mod error;\npub use error::Error;",
+            ),
+        ];
+        let (_dir, diags) = run_on_project(&files, "console/app.ts");
+        assert!(
+            diags.is_empty(),
+            "Rust crates are not barrels, got: {diags:?}"
+        );
+    }
+
+    /// A Rust file sorting first must not hide this duplicate.
+    #[test]
+    fn flags_ts_duplicate_when_a_rust_file_sorts_first() {
+        let files: Vec<(&str, &str)> = vec![
+            ("a/lib.rs", "pub fn f() {}"),
+            ("impl.ts", "export function compute() {}"),
+            ("barrel1.ts", "export { compute } from './impl';"),
+            ("barrel2.ts", "export { compute } from './impl';"),
+        ];
+        let (_dir, full) = run_on_project(&files, "barrel1.ts");
+        assert_eq!(full.len(), 1, "full scan, got: {full:?}");
+        let linted = ["a/lib.rs", "barrel1.ts"];
+        let (_dir, partial) = run_on_partial_scan(&files, "barrel1.ts", &linted);
+        assert_eq!(partial.len(), 1, "partial scan, got: {partial:?}");
     }
 }
