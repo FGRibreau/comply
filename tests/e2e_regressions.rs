@@ -5,6 +5,7 @@ mod common;
 use common::write_ts_file;
 use predicates::prelude::*;
 use std::fs;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 #[test]
@@ -708,12 +709,18 @@ fn two_staged_copies_are_reported_once_on_the_last_path_issue_8611() {
 
 /// A one-crate workspace holding `files` (path, content).
 fn rust_crate(files: &[(&str, &str)]) -> TempDir {
-    let dir = TempDir::new().unwrap();
+    let dir = tree(files);
     fs::write(
         dir.path().join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
     )
     .unwrap();
+    dir
+}
+
+/// A temp dir holding `files` (path, content).
+fn tree(files: &[(&str, &str)]) -> TempDir {
+    let dir = TempDir::new().unwrap();
     for (path, content) in files {
         let path = dir.path().join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -841,4 +848,143 @@ fn fix_reads_the_clippy_table_of_comply_toml_issue_8614() {
     let fixed = fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
     assert!(fixed.contains("is_empty()"), "{fixed}");
     assert!(fixed.contains("x >= 1 && x < 10"), "{fixed}");
+}
+
+/// Breaks `dockerfile-no-maintainer`, with no subprocess linter involved.
+const MAINTAINER_DOCKERFILE: &str = "FROM alpine:3.20.3\nMAINTAINER someone\n";
+
+/// Stdout of `comply <args>` launched from `cwd`.
+fn lint_from(cwd: &Path, args: &[&str]) -> String {
+    let output = common::comply()
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Sorted `(canonical path, line, rule)` of `comply --json <target>` from `cwd`.
+fn verdict(cwd: &Path, target: &Path) -> Vec<(PathBuf, u64, String)> {
+    let output = common::comply()
+        .current_dir(cwd)
+        .arg("--json")
+        .arg(target)
+        .output()
+        .unwrap();
+    let findings: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let mut verdict: Vec<_> = findings
+        .iter()
+        .map(|finding| {
+            let path = cwd.join(finding["path"].as_str().unwrap());
+            (
+                path.canonicalize().unwrap(),
+                finding["line"].as_u64().unwrap(),
+                finding["ruleId"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    verdict.sort();
+    verdict
+}
+
+/// A root config, a root override for `sub/**`, three Dockerfiles.
+fn project_with_root_config() -> TempDir {
+    tree(&[
+        (
+            "comply.toml",
+            "[rules.dockerfile-require-healthcheck]\ndisabled = true\n\n\
+             [overrides.\"sub/**\"]\ndisable = [\"dockerfile-no-maintainer\"]\n",
+        ),
+        ("Dockerfile", MAINTAINER_DOCKERFILE),
+        ("sub/Dockerfile", MAINTAINER_DOCKERFILE),
+        ("sub/deep/Dockerfile", MAINTAINER_DOCKERFILE),
+    ])
+}
+
+#[test]
+fn a_subdirectory_config_does_not_silence_the_root() {
+    // `Core` lists before `Dockerfile`, in git and on APFS.
+    let dir = tree(&[
+        ("Dockerfile", MAINTAINER_DOCKERFILE),
+        ("Core/Dockerfile", MAINTAINER_DOCKERFILE),
+        (
+            "Core/comply.toml",
+            "[rules.dockerfile-no-maintainer]\ndisabled = true\n",
+        ),
+    ]);
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "-A"]);
+    for args in [&["."][..], &["--staged", "--diff-only"]] {
+        let stdout = lint_from(dir.path(), args);
+        assert!(
+            stdout.lines().any(|line| line
+                .trim_start_matches("./")
+                .starts_with("Dockerfile:2:1: error [dockerfile-no-maintainer]")),
+            "comply {args:?}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn root_overrides_apply_when_launched_from_a_subdirectory() {
+    let dir = project_with_root_config();
+    git(dir.path(), &["init", "-q"]);
+    git(dir.path(), &["add", "-A"]);
+    for args in [&["."][..], &["--staged", "--diff-only"]] {
+        let stdout = lint_from(&dir.path().join("sub"), args);
+        assert!(
+            stdout.contains("dockerfile-require-multi-stage"),
+            "comply {args:?} linted nothing:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("dockerfile-no-maintainer"),
+            "comply {args:?} ignored the override:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("dockerfile-require-healthcheck"),
+            "comply {args:?} missed the root config:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn a_root_config_alone_keeps_its_verdict_from_the_root() {
+    let dir = project_with_root_config();
+    let root = dir.path().canonicalize().unwrap();
+    let expected: Vec<_> = [
+        ("Dockerfile", 1, "dockerfile-require-multi-stage"),
+        ("Dockerfile", 1, "dockerfile-require-non-root-user"),
+        ("Dockerfile", 2, "dockerfile-no-maintainer"),
+        ("sub/Dockerfile", 1, "dockerfile-require-multi-stage"),
+        ("sub/Dockerfile", 1, "dockerfile-require-non-root-user"),
+        ("sub/deep/Dockerfile", 1, "dockerfile-require-multi-stage"),
+        ("sub/deep/Dockerfile", 1, "dockerfile-require-non-root-user"),
+    ]
+    .into_iter()
+    .map(|(path, line, rule)| (root.join(path), line, rule.to_owned()))
+    .collect();
+    assert_eq!(verdict(dir.path(), Path::new(".")), expected);
+}
+
+#[test]
+fn the_verdict_does_not_depend_on_the_launch_directory() {
+    let dir = project_with_root_config();
+    let elsewhere = TempDir::new().unwrap();
+    let root = dir.path();
+    let launches = [
+        (root.to_path_buf(), PathBuf::from(".")),
+        (root.join("sub"), PathBuf::from("..")),
+        (root.join("sub/deep"), PathBuf::from("../..")),
+        (elsewhere.path().to_path_buf(), root.to_path_buf()),
+    ];
+    let reference = verdict(root, Path::new("."));
+    for (cwd, target) in &launches {
+        assert_eq!(
+            verdict(cwd, target),
+            reference,
+            "comply {} from {}",
+            target.display(),
+            cwd.display()
+        );
+    }
 }

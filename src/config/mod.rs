@@ -1,14 +1,13 @@
 //! Project configuration loaded from `comply.toml`.
 //!
 //! Lookup order at startup:
-//!   1. Walk up from the current working directory looking for the
-//!      nearest `comply.toml`.
+//!   1. Walk up from the linted path to the nearest `comply.toml`.
 //!   2. If found, parse it and merge the user's overrides on top of
 //!      the hardcoded defaults from `defaults::build_default_config`.
 //!   3. If not found, use defaults verbatim.
 //!
 //! Public API for the rest of the codebase:
-//!   - `Config::load_from_cwd()` — entry point used by `main`
+//!   - `Config::load_from(path)` — entry point used by `main`
 //!   - `Config::default()` — defaults only, used by tests
 //!   - `Config::is_rule_enabled(rule_id, file_path)` — combine global
 //!     `disabled = true` with per-glob `disable = [...]` overrides
@@ -62,6 +61,10 @@ pub struct Config {
     lang_config: LangConfigMap,
     /// Directory of the loaded `comply.toml`, `None` on defaults.
     dir: Option<PathBuf>,
+    /// Override globs start here: `dir`, then `dir` with symlinks resolved.
+    override_bases: Vec<PathBuf>,
+    /// Relative file paths start at the launch directory.
+    launch_dir: PathBuf,
 }
 
 impl Config {
@@ -75,20 +78,28 @@ impl Config {
             .expect("default config must compile")
     }
 
-    /// Walk up from `start_dir` looking for the nearest `comply.toml`.
-    /// If one is found, layer the user's overrides on top of the
-    /// defaults; otherwise return the defaults verbatim.
-    pub fn load_from(start_dir: &Path) -> Result<Self> {
-        let Some(path) = find_comply_toml(start_dir) else {
+    /// Walk up from `start`, the linted file or directory.
+    /// The nearest `comply.toml` layers its overrides on the defaults.
+    /// Without one, return the defaults verbatim.
+    pub fn load_from(start: &Path) -> Result<Self> {
+        let launch_dir =
+            std::env::current_dir().context("failed to resolve the working directory")?;
+        let start = launch_dir.join(start);
+        let Some(dir) = find_config_dir(&start) else {
             return Ok(Self::default());
         };
+        let path = dir.join(CONFIG_FILE_NAME);
         let user_text = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let user: ComplyToml = toml::from_str(&user_text)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         let merged = merge(defaults::build_default_config(), user);
         let mut config = Self::from_raw(merged)?;
-        config.dir = path.parent().map(Path::to_path_buf);
+        config.override_bases = std::iter::once(dir.to_path_buf())
+            .chain(dir.canonicalize().ok())
+            .collect();
+        config.dir = Some(dir.to_path_buf());
+        config.launch_dir = launch_dir;
         Ok(config)
     }
 
@@ -141,24 +152,17 @@ impl Config {
         if self.glob_matcher.is_empty() {
             return true;
         }
-        // Override globs are relative (e.g. `src/foo/**`). File paths arrive
-        // in two forms:
-        //   - `./src/foo.ts`  from the engine walker  → strip leading `./`
-        //   - `/abs/path/src/foo.ts` from cross-file rules (unused-file)
-        //     that store canonicalized absolute paths in the import index
-        //     → relativize against CWD (comply is always invoked from the
-        //     project root, which is where comply.toml and the override
-        //     globs are anchored).
-        let abs_relative: Option<PathBuf> = if file_path.is_absolute() {
-            std::env::current_dir()
-                .ok()
-                .and_then(|cwd| file_path.strip_prefix(&cwd).ok().map(|r| r.to_path_buf()))
-        } else {
-            None
+        // Override globs are relative to the `comply.toml` directory.
+        // The import index stores canonical paths, hence two bases.
+        // A file outside that directory matches no override.
+        let absolute = self.launch_dir.join(file_path);
+        let Some(relative) = self
+            .override_bases
+            .iter()
+            .find_map(|base| absolute.strip_prefix(base).ok())
+        else {
+            return true;
         };
-        let relative: &Path = abs_relative
-            .as_deref()
-            .unwrap_or_else(|| file_path.strip_prefix("./").unwrap_or(file_path));
         for idx in self.glob_matcher.matches(relative) {
             if self.disable_lists[idx].iter().any(|d| d == rule_id) {
                 return false;
@@ -380,6 +384,8 @@ impl Config {
             disable_lists,
             lang_config,
             dir: None,
+            override_bases: Vec::new(),
+            launch_dir: PathBuf::new(),
         })
     }
 }
@@ -443,20 +449,11 @@ fn build_lang_config(raw: &mut ComplyToml) -> Result<LangConfigMap> {
     Ok(lang_config)
 }
 
-/// Walk up from `start` looking for `comply.toml`. Returns the absolute
-/// path to the file if one is found, or `None` if we hit the filesystem
-/// root without finding one.
-fn find_comply_toml(start: &Path) -> Option<PathBuf> {
-    let mut cur = start.to_path_buf();
-    loop {
-        let candidate = cur.join(CONFIG_FILE_NAME);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        if !cur.pop() {
-            return None;
-        }
-    }
+/// Nearest ancestor of the absolute `start` holding a `comply.toml`.
+fn find_config_dir(start: &Path) -> Option<&Path> {
+    start
+        .ancestors()
+        .find(|dir| dir.join(CONFIG_FILE_NAME).is_file())
 }
 
 /// Layer `user` on top of `base`. Per-rule overrides merge field-by-field:
@@ -772,8 +769,8 @@ mod tests {
         )
         .unwrap();
         let cfg = Config::load_from(tmp.path()).unwrap();
-        assert!(!cfg.is_rule_enabled("rust-no-unwrap", Path::new("tests/foo.rs")));
-        assert!(cfg.is_rule_enabled("rust-no-unwrap", Path::new("src/foo.rs")));
+        assert!(!cfg.is_rule_enabled("rust-no-unwrap", &tmp.path().join("tests/foo.rs")));
+        assert!(cfg.is_rule_enabled("rust-no-unwrap", &tmp.path().join("src/foo.rs")));
     }
 
     #[test]
@@ -796,16 +793,16 @@ mod tests {
         // key must still match (the issue's reproducer).
         assert!(!cfg.is_rule_enabled(
             "intermediate-variables",
-            Path::new("./src/api/errors/from-database.ts")
+            &tmp.path().join("./src/api/errors/from-database.ts")
         ));
         assert!(!cfg.is_rule_enabled(
             "rust-no-unwrap",
-            Path::new("./src/api/test-helpers/setup-env.ts")
+            &tmp.path().join("./src/api/test-helpers/setup-env.ts")
         ));
         // The previously-working prefixed form keeps matching too.
         assert!(!cfg.is_rule_enabled(
             "intermediate-variables",
-            Path::new("src/api/errors/from-database.ts")
+            &tmp.path().join("src/api/errors/from-database.ts")
         ));
     }
 
@@ -824,17 +821,17 @@ mod tests {
         let cfg = Config::load_from(tmp.path()).unwrap();
         assert!(!cfg.is_rule_enabled(
             "intermediate-variables",
-            Path::new("./src/api/errors/from-database.ts")
+            &tmp.path().join("./src/api/errors/from-database.ts")
         ));
         assert!(!cfg.is_rule_enabled(
             "intermediate-variables",
-            Path::new("src/api/errors/from-database.ts")
+            &tmp.path().join("src/api/errors/from-database.ts")
         ));
     }
 
-    // Regression for #496: unused-file stores canonical absolute paths in the
-    // import index. Override globs are relative. is_rule_enabled must relativize
-    // absolute paths against CWD so the glob still fires.
+    // Regression for #496: unused-file stores canonical absolute paths.
+    // The temp dir may sit behind a symlink.
+    // Both spellings must match.
     #[test]
     fn absolute_path_override_matches_relative_glob() {
         let tmp = TempDir::new().unwrap();
@@ -847,23 +844,33 @@ mod tests {
         )
         .unwrap();
         let cfg = Config::load_from(tmp.path()).unwrap();
+        for root in [tmp.path().to_path_buf(), tmp.path().canonicalize().unwrap()] {
+            assert!(
+                !cfg.is_rule_enabled(
+                    "unused-file",
+                    &root.join("src/app/components/data-table/a.tsx")
+                ),
+                "absolute path inside overridden glob must disable the rule"
+            );
+            assert!(
+                cfg.is_rule_enabled("unused-file", &root.join("src/app/other/file.tsx")),
+                "absolute path outside overridden glob must keep the rule enabled"
+            );
+        }
+    }
 
-        // Simulate what unused-file emits: an absolute canonical path.
-        // We compute one by canonicalizing a known path under CWD. We use
-        // the test tmp dir itself to build a plausible absolute path.
-        let cwd = std::env::current_dir().unwrap();
-        let abs_path = cwd.join("src/app/components/data-table/body.tsx");
-        assert!(
-            !cfg.is_rule_enabled("unused-file", &abs_path),
-            "absolute path inside overridden glob must disable the rule"
-        );
-
-        // A file outside the override must still be enabled.
-        let abs_other = cwd.join("src/app/other/file.tsx");
-        assert!(
-            cfg.is_rule_enabled("unused-file", &abs_other),
-            "absolute path outside overridden glob must keep the rule enabled"
-        );
+    #[test]
+    fn override_ignores_a_file_outside_the_config_directory() {
+        let project = TempDir::new().unwrap();
+        fs::write(
+            project.path().join("comply.toml"),
+            "[overrides.\"**\"]\ndisable = [\"unused-file\"]\n",
+        )
+        .unwrap();
+        let cfg = Config::load_from(project.path()).unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        assert!(cfg.is_rule_enabled("unused-file", &elsewhere.path().join("a.ts")));
+        assert!(!cfg.is_rule_enabled("unused-file", &project.path().join("a.ts")));
     }
 
     #[test]
