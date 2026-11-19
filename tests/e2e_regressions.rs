@@ -1484,7 +1484,8 @@ fn range_scan_keeps_type_aware_findings_in_a_subdirectory_package() {
     )
     .unwrap();
     fs::write(root.join("console/src/a.ts"), "export const one = 1;\n").unwrap();
-    common::without_type_aware_rules(&root.join("console"));
+    // The opt-out sits at the root: both launches read it.
+    common::without_type_aware_rules(root);
     git(root, &["add", "-A"]);
     git(root, &["commit", "-qm", "base"]);
     fs::write(
