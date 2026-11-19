@@ -604,6 +604,16 @@ fn run_cross_file_rules(
     out
 }
 
+/// Where the `comply.toml` lookup starts: the linted path.
+/// The git modes take no path.
+/// They start at the working directory.
+fn config_start(mode: &cli::ScanMode) -> &std::path::Path {
+    let cli::ScanMode::All(path) = mode else {
+        return std::path::Path::new(".");
+    };
+    path
+}
+
 /// Lint only the rules whose IDs are in `filter`.
 ///
 /// In-process rules (engine rules plus the `no-clones` / `no-duplicate-comments`
@@ -628,12 +638,7 @@ fn lint_with_rules(
         return Ok(false);
     }
 
-    let config_anchor = discovered
-        .first()
-        .and_then(|f| f.path.parent())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let config = Config::load_from(&config_anchor)?;
+    let config = Config::load_from(config_start(&mode))?;
 
     let (diagnostics, clean_files) = if filter.iter().any(|id| rule_requires_subprocess(id)) {
         let type_aware = filter.iter().any(|id| rule_requires_type_aware(id));
@@ -690,17 +695,8 @@ fn lint_project(cli: &Cli) -> Result<bool> {
         return Ok(false);
     }
 
-    // Look for `comply.toml` starting from the first discovered file's
-    // directory rather than from `cwd`. This makes `comply some/path/x.ts`
-    // pick up `some/path/comply.toml` (or a parent's) without requiring
-    // the user to `cd` into the project first.
     let t_config = Instant::now();
-    let config_anchor = discovered
-        .first()
-        .and_then(|f| f.path.parent())
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let config = Config::load_from(&config_anchor)?;
+    let config = Config::load_from(config_start(&mode))?;
     timings.config = t_config.elapsed();
 
     // --fix runs the upstream fixers (oxlint --fix, cargo clippy
