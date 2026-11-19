@@ -708,14 +708,13 @@ fn two_staged_copies_are_reported_once_on_the_last_path_issue_8611() {
 }
 
 /// A one-crate workspace holding `files` (path, content).
+/// A `Cargo.toml` among `files` replaces the default manifest.
 fn rust_crate(files: &[(&str, &str)]) -> TempDir {
-    let dir = tree(files);
-    fs::write(
-        dir.path().join("Cargo.toml"),
+    let manifest = (
+        "Cargo.toml",
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
-    )
-    .unwrap();
-    dir
+    );
+    tree(&[&[manifest][..], files].concat())
 }
 
 /// A temp dir holding `files` (path, content).
