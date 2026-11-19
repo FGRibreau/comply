@@ -39,9 +39,9 @@ pub fn probe_binary(cmd: &str, args: &[&str]) -> bool {
 /// once per workspace. Resolving to the workspace root lets one `cargo`
 /// invocation cover every member with a shared build.
 ///
-/// Detection is a textual `[workspace]` probe, so it does not honor
-/// `workspace.exclude`: a file under an excluded member is still
-/// attributed to the parent workspace.
+/// Detection is a textual `[workspace]` probe.
+/// A crate in `workspace.exclude` resolves to itself.
+/// Cargo builds such a crate on its own.
 ///
 /// Pick this resolver for runners that accept `--workspace` and benefit
 /// from a shared build (clippy lint, cargo-shear).
@@ -56,15 +56,39 @@ pub fn find_cargo_workspace_root(path: &Path) -> Option<PathBuf> {
             if nearest.is_none() {
                 nearest = Some(dir.to_path_buf());
             }
-            if std::fs::read_to_string(&cargo_toml)
-                .is_ok_and(|content| content.contains("[workspace]"))
-            {
-                return Some(dir.to_path_buf());
+            let workspace = std::fs::read_to_string(&cargo_toml)
+                .ok()
+                .filter(|content| content.contains("[workspace]"));
+            if let Some(content) = workspace {
+                let excluded_crate = nearest.filter(|crate_dir| {
+                    crate_dir.as_path() != dir && excludes(&content, dir, crate_dir)
+                });
+                return excluded_crate.or_else(|| Some(dir.to_path_buf()));
             }
         }
         current = dir.parent();
     }
     nearest
+}
+
+/// Whether `workspace.exclude` of the `root` manifest covers `crate_dir`.
+/// An excluded ancestor under `root` covers it too.
+/// Runs from `root` with `--package` or `--workspace` miss it.
+fn excludes(content: &str, root: &Path, crate_dir: &Path) -> bool {
+    let Ok(manifest) = content.parse::<toml::Table>() else {
+        return false;
+    };
+    let Some(excluded) = manifest
+        .get("workspace")
+        .and_then(|w| w.get("exclude"))
+        .and_then(toml::Value::as_array)
+    else {
+        return false;
+    };
+    excluded
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .any(|entry| crate_dir.starts_with(root.join(entry.trim_end_matches('/'))))
 }
 
 /// Cargo's package selection for a clippy run over `files` in `workspace`:
@@ -139,6 +163,34 @@ mod tests {
             find_cargo_workspace_root(&file),
             Some(std::fs::canonicalize(root).unwrap())
         );
+    }
+
+    #[test]
+    fn workspace_root_of_an_excluded_crate_is_the_crate_itself() {
+        let fixture = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\nexclude = [\"tools/excl\"]\n",
+        )
+        .unwrap();
+        for (dir, name) in [
+            ("member", "member"),
+            ("tools/excl", "excl"),
+            ("tools/other", "other"),
+        ] {
+            std::fs::create_dir_all(root.join(dir).join("src")).unwrap();
+            std::fs::write(
+                root.join(dir).join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n"),
+            )
+            .unwrap();
+            std::fs::write(root.join(dir).join("src/lib.rs"), "").unwrap();
+        }
+        let of = |dir: &str| find_cargo_workspace_root(&root.join(dir).join("src/lib.rs"));
+        assert_eq!(of("tools/excl"), Some(root.join("tools/excl")));
+        assert_eq!(of("member"), Some(root.clone()));
+        assert_eq!(of("tools/other"), Some(root));
     }
 
     #[test]
