@@ -13,6 +13,8 @@
 //!            --manifest-path <workspace>/Cargo.toml \
 //!            -- -W clippy::lint1 -W clippy::lint2 ...
 //!
+//!    The [`sqlx`] module picks where `sqlx::query!` reads query types.
+//!
 //!    Cargo emits one JSON object per line. We parse the stream,
 //!    keep only `compiler-message` rows, filter to spans inside the
 //!    requested files, and remap each lint code to its comply RuleMeta.
@@ -30,6 +32,7 @@ mod all_lints;
 pub(crate) mod config_writer;
 mod remap;
 mod schema;
+mod sqlx;
 
 use anyhow::{Context, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -104,7 +107,17 @@ pub fn lint_files(
                 } else {
                     vec!["--workspace".to_owned()]
                 };
-                let output = invoke_clippy(&root, &packages, &lint_args, &clippy_conf_dir)?;
+                let source = sqlx::Source::first(&root);
+                let run = |source| invoke_clippy(&root, &packages, &lint_args, &clippy_conf_dir, source);
+                let output = run(source)?;
+                let output = match sqlx::cache_miss(&root, source, &output.stdout)? {
+                    None => output,
+                    Some(miss) => {
+                        let online = run(sqlx::Source::Database)?;
+                        ensure_analyzed(&root, &online).map_err(|refusal| miss.explain(refusal))?;
+                        online
+                    }
+                };
                 ensure_analyzed(&root, &output)?;
                 diagnostics.extend(parse_clippy_jsonl(
                     &output.stdout,
@@ -228,11 +241,13 @@ pub(crate) fn group_by_workspace<'a>(
 ///
 /// `clippy_conf_dir` holds comply's generated `clippy.toml` (`CLIPPY_CONF_DIR`).
 /// `lint_files` refused any project `clippy.toml` beforehand.
+/// `source` says where `sqlx::query!` reads query types.
 fn invoke_clippy(
     workspace: &Path,
     packages: &[String],
     lint_args: &[String],
     clippy_conf_dir: &Path,
+    source: sqlx::Source,
 ) -> Result<std::process::Output> {
     let manifest = workspace.join("Cargo.toml");
     let mut cmd = Command::new("cargo");
@@ -244,7 +259,7 @@ fn invoke_clippy(
         "--manifest-path",
     ]);
     cmd.arg(&manifest);
-    apply_sqlx_offline(&mut cmd, workspace);
+    source.apply(&mut cmd);
     cmd.arg("--");
     for arg in lint_args {
         cmd.arg(arg);
@@ -264,24 +279,6 @@ fn invoke_clippy(
 
 /// How many build errors the refusal quotes.
 const QUOTED_BUILD_ERRORS: usize = 5;
-
-/// A workspace that ships a `.sqlx` cache is linted offline, the way CI
-/// builds it. Left online, `sqlx::query!` dials the database of the
-/// nearest `.env` while rustc expands it; an unreachable one stops the
-/// build and clippy then lints nothing at all. Honor an explicit
-/// `SQLX_OFFLINE` from the caller: a stale cache still fails loudly.
-fn apply_sqlx_offline(cmd: &mut Command, workspace: &Path) {
-    if forces_sqlx_offline(workspace, std::env::var_os("SQLX_OFFLINE").as_deref()) {
-        cmd.env("SQLX_OFFLINE", "true");
-    }
-}
-
-/// Split out of [`apply_sqlx_offline`] so the decision is testable
-/// without touching the environment of the whole test process.
-fn forces_sqlx_offline(workspace: &Path, caller_choice: Option<&std::ffi::OsStr>) -> bool {
-    let already_chosen = caller_choice.is_some_and(|v| !v.is_empty());
-    !already_chosen && workspace.join(".sqlx").is_dir()
-}
 
 /// Refuse a clippy run that linted nothing while looking successful.
 ///
@@ -521,22 +518,6 @@ mod tests {
 {"reason":"build-finished","success":true}"#;
         assert_eq!(compiled_crates(json, Path::new("/ws")), 1);
         assert_eq!(compiled_crates(json, Path::new("/other")), 0);
-    }
-
-    /// A workspace whose `.sqlx` cache is committed must lint offline,
-    /// unless the caller already picked a mode.
-    #[test]
-    fn sqlx_offline_is_forced_only_for_a_cached_workspace_the_caller_left_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let cached = dir.path().join("cached");
-        std::fs::create_dir_all(cached.join(".sqlx")).unwrap();
-        let plain = dir.path().join("plain");
-        std::fs::create_dir_all(&plain).unwrap();
-
-        assert!(forces_sqlx_offline(&cached, None));
-        assert!(forces_sqlx_offline(&cached, Some(std::ffi::OsStr::new(""))));
-        assert!(!forces_sqlx_offline(&cached, Some(std::ffi::OsStr::new("false"))));
-        assert!(!forces_sqlx_offline(&plain, None));
     }
 
     #[test]
