@@ -112,8 +112,8 @@ pub(super) fn cache_miss(
     let crates: Vec<String> = missed.iter().map(|(name, _)| format!("`{name}`")).collect();
     let mut databases: Vec<String> = Vec::new();
     for (_, dir) in &missed {
-        let database =
-            database_for(workspace, dir).map_err(|why| refusal(workspace, &crates, &why, stdout))?;
+        let database = database_for(workspace, dir)
+            .map_err(|why| refusal(workspace, &crates, &why, stdout))?;
         if !databases.contains(&database) {
             databases.push(database);
         }
@@ -135,7 +135,10 @@ fn uncached_crates(stdout: &[u8]) -> Vec<(String, PathBuf)> {
         let (Some(manifest), Some(target)) = (envelope.manifest_path, envelope.target) else {
             continue;
         };
-        let dir = Path::new(&manifest).parent().map(Path::to_path_buf).unwrap_or_default();
+        let dir = Path::new(&manifest)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         let entry = (target.name, dir);
         if uncached && !crates.contains(&entry) {
             crates.push(entry);
@@ -186,14 +189,15 @@ impl std::fmt::Display for Origin {
 /// It must accept a connection first.
 fn database_for(workspace: &Path, dir: &Path) -> Result<String, NoDatabase> {
     let from_env = std::env::var("DATABASE_URL").ok();
-    let (url, origin) = database_url(workspace, dir, from_env).ok_or_else(|| NoDatabase::Unset {
-        dir: dir.to_path_buf(),
-    })?;
+    let (url, origin) =
+        database_url(workspace, dir, from_env).ok_or_else(|| NoDatabase::Unset {
+            dir: dir.to_path_buf(),
+        })?;
     match endpoint(&url) {
         Some(Endpoint::Local) => Ok(format!("the local database of `DATABASE_URL` ({origin})")),
-        Some(Endpoint::Tcp(host, port)) if accepts_connections(&host, port) => {
-            Ok(format!("the database at {host}:{port} (`DATABASE_URL`, {origin})"))
-        }
+        Some(Endpoint::Tcp(host, port)) if accepts_connections(&host, port) => Ok(format!(
+            "the database at {host}:{port} (`DATABASE_URL`, {origin})"
+        )),
         Some(Endpoint::Tcp(host, port)) => Err(NoDatabase::Unreachable { host, port, origin }),
         None => Err(NoDatabase::UnreadableUrl { origin }),
     }
@@ -216,7 +220,10 @@ fn database_url(
     let file = if own.is_file() {
         own
     } else {
-        workspace.ancestors().map(|d| d.join(".env")).find(|f| f.is_file())?
+        workspace
+            .ancestors()
+            .map(|d| d.join(".env"))
+            .find(|f| f.is_file())?
     };
     let url = dotenv_value(&file, "DATABASE_URL")?;
     Some((url, Origin::File(file)))
@@ -249,7 +256,12 @@ fn unquote(value: &str) -> String {
             return rest.split(quote).next().unwrap_or_default().to_owned();
         }
     }
-    value.split(" #").next().unwrap_or_default().trim().to_owned()
+    value
+        .split(" #")
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_owned()
 }
 
 /// Where the database of a `DATABASE_URL` listens.
@@ -277,11 +289,11 @@ fn endpoint(url: &str) -> Option<Endpoint> {
         .into_iter()
         .flat_map(|(_, query)| query.split('&'))
         .any(|pair| pair.starts_with("host=/") || pair.starts_with("host=%2F"));
-    let hostport = authority.rsplit_once('@').map_or(authority, |(_, hostport)| hostport);
+    let hostport = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, hostport)| hostport);
     let (host, port) = match hostport.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && !port.contains(']') => {
-            (host, port.parse().ok()?)
-        }
+        Some((host, port)) if !host.is_empty() && !port.contains(']') => (host, port.parse().ok()?),
         _ => (hostport, default_port),
     };
     if socket_dir || host.is_empty() {
@@ -372,9 +384,17 @@ mod tests {
     fn cache_miss_is_read_only_after_a_cache_first_run() {
         let json = br#"{"reason":"compiler-message","manifest_path":"/ws/it/Cargo.toml","target":{"name":"it","kind":["lib"]},"message":{"message":"`SQLX_OFFLINE=true` but there is no cached data for this query","level":"error","spans":[]}}"#;
         for source in [Source::Inherited, Source::Database] {
-            assert!(cache_miss(Path::new("/ws"), source, json).unwrap().is_none());
+            assert!(
+                cache_miss(Path::new("/ws"), source, json)
+                    .unwrap()
+                    .is_none()
+            );
         }
-        assert!(cache_miss(Path::new("/ws"), Source::Cache, b"").unwrap().is_none());
+        assert!(
+            cache_miss(Path::new("/ws"), Source::Cache, b"")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -382,20 +402,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join(".env");
         let cases = [
-            ("DATABASE_URL=postgres://a@h/db\n", Some("postgres://a@h/db")),
+            (
+                "DATABASE_URL=postgres://a@h/db\n",
+                Some("postgres://a@h/db"),
+            ),
             (
                 "export DATABASE_URL=\"postgres://a:b@h:5433/db\" # used by sqlx\n",
                 Some("postgres://a:b@h:5433/db"),
             ),
             ("DATABASE_URL='postgres://h/db'\n", Some("postgres://h/db")),
-            ("DATABASE_URL=postgres://h/db # local\n", Some("postgres://h/db")),
-            ("DATABASE_URL=postgres://h/a\nDATABASE_URL=postgres://h/b\n", Some("postgres://h/b")),
+            (
+                "DATABASE_URL=postgres://h/db # local\n",
+                Some("postgres://h/db"),
+            ),
+            (
+                "DATABASE_URL=postgres://h/a\nDATABASE_URL=postgres://h/b\n",
+                Some("postgres://h/b"),
+            ),
             ("# DATABASE_URL=postgres://h/db\nAPI_DATABASE_URL=x\n", None),
             ("DATABASE_URL=\n", None),
         ];
         for (text, expected) in cases {
             std::fs::write(&file, text).unwrap();
-            assert_eq!(dotenv_value(&file, "DATABASE_URL").as_deref(), expected, "{text}");
+            assert_eq!(
+                dotenv_value(&file, "DATABASE_URL").as_deref(),
+                expected,
+                "{text}"
+            );
         }
     }
 
@@ -409,7 +442,11 @@ mod tests {
         let other = ws.join("other");
         std::fs::create_dir_all(&member).unwrap();
         std::fs::create_dir_all(&other).unwrap();
-        std::fs::write(dir.path().join(".env"), "DATABASE_URL=postgres://above/db\n").unwrap();
+        std::fs::write(
+            dir.path().join(".env"),
+            "DATABASE_URL=postgres://above/db\n",
+        )
+        .unwrap();
         std::fs::write(member.join(".env"), "OTHER=1\n").unwrap();
 
         assert_eq!(database_url(&ws, &member, None), None);
@@ -418,7 +455,10 @@ mod tests {
         assert_eq!(origin, Origin::File(dir.path().join(".env")));
         let set = Some("postgres://env/db".to_owned());
         let (url, origin) = database_url(&ws, &member, set).unwrap();
-        assert_eq!((url.as_str(), origin), ("postgres://env/db", Origin::Environment));
+        assert_eq!(
+            (url.as_str(), origin),
+            ("postgres://env/db", Origin::Environment)
+        );
         let (url, _) = database_url(&ws, &other, Some(String::new())).unwrap();
         assert_eq!(url, "postgres://above/db");
     }
@@ -427,13 +467,22 @@ mod tests {
     fn endpoint_reads_host_and_port_of_tcp_urls_only() {
         let tcp = |host: &str, port| Some(Endpoint::Tcp(host.to_owned(), port));
         let cases = [
-            ("postgres://u:p@db.example:6543/app", tcp("db.example", 6543)),
-            ("postgresql://u@127.0.0.1/app?sslmode=disable", tcp("127.0.0.1", 5432)),
+            (
+                "postgres://u:p@db.example:6543/app",
+                tcp("db.example", 6543),
+            ),
+            (
+                "postgresql://u@127.0.0.1/app?sslmode=disable",
+                tcp("127.0.0.1", 5432),
+            ),
             ("postgres://u:p%40ss@[::1]:5433/app", tcp("::1", 5433)),
             ("postgres://[::1]/app", tcp("::1", 5432)),
             ("mysql://root@localhost/app", tcp("localhost", 3306)),
             ("postgres:///app?host=/tmp", Some(Endpoint::Local)),
-            ("postgres://u@localhost/app?host=%2Ftmp", Some(Endpoint::Local)),
+            (
+                "postgres://u@localhost/app?host=%2Ftmp",
+                Some(Endpoint::Local),
+            ),
             ("sqlite://data.db", Some(Endpoint::Local)),
             ("redis://localhost", None),
             ("postgres://h:notaport/app", None),
@@ -477,7 +526,10 @@ mod tests {
         }
         .into();
         let text = miss.explain(inner).to_string();
-        assert!(text.starts_with("The `.sqlx` cache lacks queries of `it`."), "{text}");
+        assert!(
+            text.starts_with("The `.sqlx` cache lacks queries of `it`."),
+            "{text}"
+        );
         assert!(text.contains("the database at h:5432"), "{text}");
         assert!(text.contains("relation \"item\" does not exist"), "{text}");
     }

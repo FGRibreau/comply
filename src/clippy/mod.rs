@@ -116,7 +116,8 @@ pub fn lint_files(
                     vec!["--workspace".to_owned()]
                 };
                 let source = sqlx::Source::first(&root);
-                let run = |source| invoke_clippy(&root, &packages, &lint_args, &clippy_conf_dir, source);
+                let run =
+                    |source| invoke_clippy(&root, &packages, &lint_args, &clippy_conf_dir, source);
                 let output = run(source)?;
                 let output = match sqlx::cache_miss(&root, source, &output.stdout)? {
                     None => output,
