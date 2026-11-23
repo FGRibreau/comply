@@ -12,9 +12,23 @@ use crate::rules::path_utils::{
     is_auto_mock_dir_path, is_config_file, is_framework_entry_point, is_sample_dir_path,
     is_storybook_config_dir, is_storybook_story, is_top_level_script_dir_path,
 };
+use std::io::{BufRead, Read};
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+use wait_timeout::ChildExt;
 
 const RULE_ID: &str = "unused-file";
+
+/// Programs whose first operand is the script they run.
+const SCRIPT_RUNTIMES: [&str; 5] = ["node", "bun", "deno", "tsx", "ts-node"];
+/// `git ls-files` only reads the index.
+const LAUNCHER_LIST_TIMEOUT: Duration = Duration::from_secs(10);
+const LAUNCHER_LIST_CAP: u64 = 4 << 20;
+const LAUNCHER_FILE_CAP: u64 = 1 << 20;
+const LAUNCHER_MAX_FILES: usize = 4096;
+/// A shebang line is short.
+const SHEBANG_CAP: u64 = 256;
 
 #[derive(Debug)]
 pub struct Check;
@@ -108,11 +122,14 @@ fn detect_entry_points<'a>(
     canon_workspace_roots: &FxHashSet<std::path::PathBuf>,
 ) -> Vec<&'a Path> {
     let gecko_loaded_module_names = gecko_dynamic_loaded_module_names(index);
+    let shell_launched_module_names = shell_launched_module_names(canon_root);
     index
         .indexed_paths()
         .filter(|p| {
             is_entry_point(p, project, canon_root, canon_workspace_roots)
                 || is_test_file(p)
+                || is_named_in(p, &shell_launched_module_names)
+                || has_js_runtime_shebang(p)
                 || is_typeorm_glob_loaded_file(p)
                 || is_gecko_dynamic_loaded_file(p, &gecko_loaded_module_names)
                 || project.entrypoints_contains(p)
@@ -127,6 +144,196 @@ fn detect_entry_points<'a>(
                 || project.is_ng_package_entry_file(p)
         })
         .collect()
+}
+
+/// Basenames of the scripts tracked launchers run.
+/// Launchers: tracked `.sh` and `*.gitlab-ci.yml` files.
+/// The basename stands in for the path.
+fn shell_launched_module_names(root: Option<&Path>) -> FxHashSet<String> {
+    let mut names = FxHashSet::default();
+    let Some(root) = root else {
+        return names;
+    };
+    // Relative scan paths give `""`, the working directory.
+    let root = if root.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        root
+    };
+    let texts = tracked_launchers(root)
+        .into_iter()
+        .take(LAUNCHER_MAX_FILES)
+        .map(|launcher| root.join(launcher))
+        .filter(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() <= LAUNCHER_FILE_CAP))
+        .filter_map(|path| std::fs::read_to_string(path).ok());
+    for text in texts {
+        collect_launched_module_names(&text, &mut names);
+    }
+    names
+}
+
+/// Launchers git tracks across the repository, relative to `root`.
+/// Empty outside a repository, on failure or past the deadline.
+fn tracked_launchers(root: &Path) -> Vec<String> {
+    let Ok(mut child) = Command::new("git")
+        .args([
+            "ls-files",
+            "-z",
+            "--",
+            ":(top)*.sh",
+            ":(top)*.gitlab-ci.yml",
+        ])
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return Vec::new();
+    };
+    let Some(stdout) = child.stdout.take() else {
+        return stop_listing(child);
+    };
+    // Unread, a long listing would block git until the deadline.
+    let reader = std::thread::spawn(move || {
+        let mut raw = Vec::new();
+        stdout
+            .take(LAUNCHER_LIST_CAP)
+            .read_to_end(&mut raw)
+            .map(|_| raw)
+    });
+    let Ok(Some(status)) = child.wait_timeout(LAUNCHER_LIST_TIMEOUT) else {
+        return stop_listing(child);
+    };
+    let Some(raw) = reader.join().ok().and_then(Result::ok) else {
+        return Vec::new();
+    };
+    if !status.success() {
+        return Vec::new();
+    }
+    raw.split(|&byte| byte == 0)
+        .filter_map(|name| std::str::from_utf8(name).ok())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Stop a `git ls-files` that outstayed its deadline.
+/// A failed kill or wait means it already exited.
+fn stop_listing(mut child: Child) -> Vec<String> {
+    child.kill().ok();
+    child.wait().ok();
+    Vec::new()
+}
+
+/// Add the script each runtime call in `text` runs.
+/// Its first operand past the flags is the script.
+fn collect_launched_module_names(text: &str, names: &mut FxHashSet<String>) {
+    let scripts = text
+        .lines()
+        .flat_map(command_words)
+        .filter(|(word, _)| SCRIPT_RUNTIMES.contains(&basename(word)))
+        .filter_map(|(_, rest)| launched_script(rest).map(basename))
+        .filter(|name| is_module_filename(name));
+    names.extend(scripts.map(str::to_owned));
+}
+
+/// Each word of `line`, with the text that follows it.
+fn command_words(line: &str) -> Vec<(&str, &str)> {
+    let mut words = Vec::new();
+    let mut start = None;
+    let ends = line.char_indices().chain(std::iter::once((line.len(), ' ')));
+    for (at, letter) in ends {
+        if !is_word_separator(letter) {
+            start = start.or(Some(at));
+        } else if let Some(from) = start.take() {
+            words.push((&line[from..at], &line[at..]));
+        }
+    }
+    words
+}
+
+/// True where a shell command word can start.
+fn is_word_separator(letter: char) -> bool {
+    letter.is_whitespace() || matches!(letter, '(' | ')' | ';' | '|' | '&' | '`')
+}
+
+/// The last path segment of a shell word, quotes removed.
+fn basename(word: &str) -> &str {
+    let segment = word.rsplit('/').next().unwrap_or(word);
+    segment.trim_matches(['"', '\''])
+}
+
+/// The first operand in `rest` past flags and `run`.
+fn launched_script(mut rest: &str) -> Option<&str> {
+    loop {
+        let (word, after) = first_shell_word(rest);
+        if word.is_empty() {
+            return None;
+        }
+        if !word.starts_with('-') && word != "run" {
+            return Some(word);
+        }
+        rest = after;
+    }
+}
+
+/// Split the first shell word off `rest`.
+/// Quotes and `$( )` keep their spaces inside the word.
+fn first_shell_word(rest: &str) -> (&str, &str) {
+    let rest = rest.trim_start();
+    let mut depth = 0_usize;
+    let mut quote = None;
+    for (at, letter) in rest.char_indices() {
+        match letter {
+            '(' => depth = depth.saturating_add(1),
+            ')' if depth > 0 => depth = depth.saturating_sub(1),
+            '"' | '\'' if depth == 0 => {
+                quote = if quote == Some(letter) {
+                    None
+                } else {
+                    quote.or(Some(letter))
+                };
+            }
+            _ if depth == 0 && quote.is_none() && is_word_separator(letter) => {
+                return rest.split_at(at);
+            }
+            _ => {}
+        }
+    }
+    (rest, "")
+}
+
+/// True for a script whose shebang names a runtime.
+/// The shell runs it directly, so nothing imports it.
+fn has_js_runtime_shebang(path: &Path) -> bool {
+    if !matches!(
+        Language::from_path(path),
+        Some(Language::TypeScript | Language::Tsx | Language::JavaScript)
+    ) {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = String::new();
+    if std::io::BufReader::new(file.take(SHEBANG_CAP))
+        .read_line(&mut head)
+        .is_err()
+    {
+        return false;
+    }
+    head.starts_with("#!")
+        && head
+            .split(|letter: char| letter.is_whitespace() || letter == '/')
+            .any(|word| SCRIPT_RUNTIMES.contains(&word))
+}
+
+/// True when `path`'s basename is one of `names`.
+fn is_named_in(path: &Path, names: &FxHashSet<String>) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| names.contains(name))
 }
 
 /// File basenames referenced by a Gecko/Firefox runtime module loader anywhere
@@ -558,6 +765,29 @@ mod tests {
     use tempfile::TempDir;
 
     fn run_on_project(files: &[(&str, &str)]) -> (TempDir, Vec<Diagnostic>) {
+        run_in_prepared_dir(files, |_| {})
+    }
+
+    /// `run_on_project` in a repository where git tracks every file.
+    fn run_on_tracked_project(files: &[(&str, &str)]) -> (TempDir, Vec<Diagnostic>) {
+        run_in_prepared_dir(files, |dir| {
+            for args in [&["init", "-q"][..], &["add", "-A"]] {
+                let status = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(dir)
+                    .status()
+                    .expect("git must be on PATH");
+                assert!(status.success(), "git {args:?} failed");
+            }
+        })
+    }
+
+    /// Write `files`, run `prepare`, then check the anchor.
+    /// A file comply does not lint is written, not indexed.
+    fn run_in_prepared_dir(
+        files: &[(&str, &str)],
+        prepare: impl Fn(&Path),
+    ) -> (TempDir, Vec<Diagnostic>) {
         let dir = TempDir::new().unwrap();
         let mut source_files: Vec<SourceFile> = Vec::new();
         for (rel, content) in files {
@@ -566,12 +796,15 @@ mod tests {
                 fs::create_dir_all(parent).unwrap();
             }
             fs::write(&p, content).unwrap();
-            let lang = Language::from_path(&p).unwrap();
+            let Some(lang) = Language::from_path(&p) else {
+                continue;
+            };
             source_files.push(SourceFile {
                 path: p,
                 language: lang,
             });
         }
+        prepare(dir.path());
         let refs: Vec<&SourceFile> = source_files.iter().collect();
         let config = Config::default();
         let project = ProjectCtx::load(&refs, &config);
@@ -2618,5 +2851,58 @@ mod tests {
             diags[0].path.to_str().unwrap().contains("orphan"),
             "a wildcard-re-exported module is reachable through the barrel: {diags:?}"
         );
+    }
+
+    // A tracked script or CI job can run a file.
+    // That file is an entry point.
+    // Seen twice: fanout-api.sh ran fanout-block.mjs.
+    #[test]
+    fn files_run_by_tracked_scripts_or_a_shebang_are_entry_points() {
+        let files: Vec<(&str, &str)> = vec![
+            (".gitignore", "local.sh\n"),
+            ("index.ts", "export const root = 1;\n"),
+            (
+                "doctrine/fanout-api.sh",
+                "#!/bin/bash\nHERE=$(cd \"$(dirname \"$0\")\" && pwd)\n\
+                 AGENTS=$(BLOCK=\"$BLOCK\" timeout 600 node \"$HERE/fanout-select.mjs\")\n\
+                 timeout 900 node \"$HERE/fanout-block.mjs\"\n\
+                 node --max-old-space-size=512 \"$(dirname \"$0\")/sibling.mjs\" \"$@\"\n",
+            ),
+            (
+                "doctrine/fanout-block.mjs",
+                "import { client } from './paperclip-api.mjs';\nvoid client;\n",
+            ),
+            ("doctrine/fanout-select.mjs", "export const select = 1;\n"),
+            ("doctrine/sibling.mjs", "export const sibling = 1;\n"),
+            ("doctrine/paperclip-api.mjs", "export const client = 1;\n"),
+            (
+                ".gitlab-ci.yml",
+                "check:\n  script:\n    - npx tsx ci/check.ts\n    - deno run -A ci/task.ts\n",
+            ),
+            ("ci/check.ts", "export const check = 1;\n"),
+            ("ci/task.ts", "export const task = 1;\n"),
+            ("cli.mjs", "#!/usr/bin/env node\nexport const cli = 1;\n"),
+            ("local.sh", "node local-only.mjs\n"),
+            ("local-only.mjs", "export const localOnly = 1;\n"),
+            ("doctrine/orphan.mjs", "export const orphan = 1;\n"),
+        ];
+        let (_dir, diags) = run_on_tracked_project(&files);
+        let mut flagged: Vec<&str> = diags
+            .iter()
+            .filter_map(|diag| diag.path.file_name().and_then(|name| name.to_str()))
+            .collect();
+        flagged.sort_unstable();
+        // An untracked script proves nothing: local-only.mjs stays flagged.
+        assert_eq!(flagged, ["local-only.mjs", "orphan.mjs"], "{diags:?}");
+    }
+
+    #[test]
+    fn a_runtime_named_without_a_script_operand_seeds_nothing() {
+        let mut names = FxHashSet::default();
+        collect_launched_module_names(
+            "node -e 'console.log(1)'\nbun run build\nnode --import tsx\necho node.mjs\n",
+            &mut names,
+        );
+        assert!(names.is_empty(), "{names:?}");
     }
 }
