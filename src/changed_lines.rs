@@ -30,7 +30,12 @@ pub type ChangedLines = FxHashMap<PathBuf, BTreeSet<usize>>;
 pub fn changed_lines(mode: &ScanMode) -> Result<ChangedLines> {
     let output = match mode {
         ScanMode::All(_) => return Ok(FxHashMap::default()),
-        ScanMode::WorkingTree => run_git_diff(&["diff", "--unified=0", "--no-color"]),
+        ScanMode::WorkingTree => {
+            let diff = run_git_diff(&["diff", "--unified=0", "--no-color"])?;
+            let mut changed = parse_unified_diff(&diff);
+            add_untracked_files(&mut changed)?;
+            return Ok(changed);
+        }
         ScanMode::Staged => run_git_diff(&["diff", "--cached", "--unified=0", "--no-color"]),
         ScanMode::LastCommit => {
             run_git_diff(&["diff", "--unified=0", "--no-color", "HEAD~1", "HEAD"])
@@ -47,6 +52,37 @@ pub fn changed_lines(mode: &ScanMode) -> Result<ChangedLines> {
         ]),
     }?;
     Ok(parse_unified_diff(&output))
+}
+
+/// Mark every line of each lintable untracked file as changed.
+/// The whole file is new.
+fn add_untracked_files(changed: &mut ChangedLines) -> Result<()> {
+    let listing = run_git_diff(&[
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--full-name",
+        "-z",
+    ])?;
+    let Some(root) = git_repo_root() else {
+        return Ok(());
+    };
+    let names = listing
+        .split(|&byte| byte == 0)
+        .filter_map(|raw| std::str::from_utf8(raw).ok())
+        // Only a file comply lints is worth reading.
+        .filter(|name| !name.is_empty() && crate::files::is_lintable(Path::new(name)));
+    for name in names {
+        let Ok(bytes) = std::fs::read(root.join(name)) else {
+            continue;
+        };
+        let line_count = bytes
+            .split(|&byte| byte == b'\n')
+            .count()
+            .saturating_sub(usize::from(bytes.ends_with(b"\n")));
+        changed.insert(PathBuf::from(name), (1..=line_count).collect());
+    }
+    Ok(())
 }
 
 /// True if `diag` falls on a line that appears in the changed-lines set

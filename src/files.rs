@@ -10,6 +10,7 @@
 //! - Git modes → shell out to `git diff` / `git show` and validate exit
 //!   status (silent empty output used to mask real failures). The paths git
 //!   lists go through the same `.complyignore` files as the walk.
+//!   `--working-tree` adds the untracked files `.gitignore` keeps.
 //! - Each file is classified by extension into a Language; unknown
 //!   extensions are silently skipped.
 
@@ -216,7 +217,11 @@ pub fn discover(mode: &ScanMode) -> Result<Vec<SourceFile>> {
             };
             return Ok(drop_complyignored(files, &working_directory()?, &top));
         }
-        ScanMode::WorkingTree => git_diff_files(&[])?,
+        ScanMode::WorkingTree => {
+            let mut files = git_diff_files(&[])?;
+            files.extend(git_untracked_files()?);
+            files
+        }
         ScanMode::Staged => git_diff_files(&["--cached"])?,
         // `HEAD~1 HEAD` — without the second `HEAD`, git diffs against the
         // working tree and mixes unstaged changes into "last commit" results.
@@ -452,6 +457,14 @@ fn git_diff_files(args: &[&str]) -> Result<Vec<SourceFile>> {
     capture_git_output(cmd, "git diff")
 }
 
+/// Untracked files that `.gitignore` does not exclude.
+/// `git diff` never lists them: a new folder looked clean.
+fn git_untracked_files() -> Result<Vec<SourceFile>> {
+    let mut cmd = Command::new("git");
+    cmd.args(["ls-files", "--others", "--exclude-standard"]);
+    capture_git_output(cmd, "git ls-files")
+}
+
 /// `git show --name-only` for a single commit — handles initial and merge
 /// commits, which `git diff <sha>~1 <sha>` cannot.
 fn git_show_files(sha: &str) -> Result<Vec<SourceFile>> {
@@ -487,6 +500,11 @@ fn parse_git_output(stdout: &[u8]) -> Result<Vec<SourceFile>> {
         .filter(|l| !l.is_empty())
         .filter_map(|l| classify(Path::new(l)))
         .collect())
+}
+
+/// True when comply lints the file at `path`.
+pub(crate) fn is_lintable(path: &Path) -> bool {
+    classify(path).is_some()
 }
 
 /// Returns None for unsupported extensions (silently skipped).

@@ -418,6 +418,38 @@ fn diff_only_from_a_subdirectory_keeps_the_staged_findings() {
 }
 
 #[test]
+fn working_tree_lints_untracked_files_but_not_ignored_ones() {
+    // `--working-tree` listed `git diff` paths only.
+    // A new folder passed, then the commit gate refused it.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    common::without_type_aware_rules(root);
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+    fs::write(root.join("a.ts"), "export const one = 1;\n").unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+
+    let nested = "export const one = 1;\nexport const two = a ? b ? 1 : 2 : 3;\n";
+    fs::create_dir(root.join("fresh")).unwrap();
+    fs::write(root.join("fresh/new.ts"), nested).unwrap();
+    fs::create_dir(root.join("ignored")).unwrap();
+    fs::write(root.join("ignored/skip.ts"), nested).unwrap();
+
+    for args in [&["--working-tree"][..], &["--working-tree", "--diff-only"]] {
+        common::comply()
+            .current_dir(root)
+            .args(args)
+            .assert()
+            .stdout(predicate::str::contains("new.ts:2"))
+            .stdout(predicate::str::contains("no-nested-ternary"))
+            .stdout(predicate::str::contains("skip.ts").not());
+    }
+}
+
+#[test]
 fn missing_type_aware_toolchain_is_an_instruction_not_a_crash_issue_8109() {
     // A TypeScript project with a tsconfig.json but no typescript-go API package
     // in its node_modules is every repo you clone. comply diagnoses that gap
