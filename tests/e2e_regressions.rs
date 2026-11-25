@@ -354,18 +354,142 @@ fn a_comply_ignore_marker_counts_only_in_a_comment_of_its_language() {
         ),
     ];
     for (file, rule, comment, text) in cases {
-        let marker = format!("comply-ignore-file: {rule} — kept on purpose");
-        let (comment, text) = (comment.replace('@', &marker), text.replace('@', &marker));
-        assert_eq!(
-            positions(rule, file, &comment),
-            Vec::<String>::new(),
-            "{file}:\n{comment}"
-        );
-        let reported = positions(rule, file, &text);
-        assert!(!reported.is_empty(), "{file}:\n{text}");
-        let plain = text.replace("comply-ignore", "comply-notice");
-        assert_eq!(reported, positions(rule, file, &plain), "{file}:\n{text}");
+        assert_only_a_comment_silences(rule, file, &comment, &text);
     }
+}
+
+/// A marker in `comment` silences `rule`.
+/// One in `text` does not.
+/// `@` stands for the marker.
+fn assert_only_a_comment_silences(rule: &str, file: &str, comment: &str, text: &str) {
+    let marker = format!("comply-ignore-file: {rule} — kept on purpose");
+    let (comment, text) = (comment.replace('@', &marker), text.replace('@', &marker));
+    assert_eq!(
+        positions(rule, file, &comment),
+        Vec::<String>::new(),
+        "{file}:\n{comment}"
+    );
+    let reported = positions(rule, file, &text);
+    assert!(!reported.is_empty(), "{file}:\n{text}");
+    let plain = text.replace("comply-ignore", "comply-notice");
+    assert_eq!(reported, positions(rule, file, &plain), "{file}:\n{text}");
+}
+
+#[test]
+fn a_dockerfile_marker_after_an_instruction_is_text() {
+    for instruction in [
+        "ARG A=b # @",
+        "ENV NOTE x # @",
+        "ENV NOTE=x # @",
+        "EXPOSE 80 # @",
+        "FROM alpine:3.20 # @",
+        "LABEL a=b \\\n  note=x # @",
+        "LABEL note=x # @",
+        "USER app # @",
+        "WORKDIR /app # @",
+    ] {
+        assert_only_a_comment_silences(
+            "dockerfile-apk-no-cache",
+            "Dockerfile",
+            "FROM alpine:3.20\nRUN echo a && \\\n  # @\n  echo b\nRUN apk add curl\n",
+            &format!("FROM alpine:3.20\n{instruction}\nRUN apk add curl\n"),
+        );
+    }
+}
+
+#[test]
+fn a_css_marker_in_a_bare_url_is_text() {
+    for url in ["url(\n/* @ */\n)", "URL(data:image/svg+xml,/* @ */)"] {
+        assert_only_a_comment_silences(
+            "css-no-empty-block",
+            "app.css",
+            ".a { background: url(\"a.png\"); } /* @ */\n.b {}\n",
+            &format!(".a {{ background: {url}; }}\n.b {{}}\n"),
+        );
+    }
+}
+
+#[test]
+fn an_nginx_marker_in_a_word_or_a_lua_block_is_text() {
+    let header = "server {\n  add_header X-Frame-Options DENY;\n}\n";
+    let lua = "content_by_lua_block {\n  local s = [[ }\n  # @\n  ]] -- }\n}\n";
+    for text in ["return 301 ${host}# @\n;", "rewrite ^/(a{2}# @\n) /x;", lua] {
+        assert_only_a_comment_silences(
+            "nginx-add-header-always",
+            "nginx/site.conf",
+            &format!("server {{ content_by_lua_block {{ a = {{}} }} }} # @\n{header}"),
+            &format!("server {{ {text} }}\n{header}"),
+        );
+    }
+}
+
+#[test]
+fn a_vue_marker_outside_a_comment_is_text() {
+    let image = "<img src=\"x.png\">";
+    for text in [
+        "<p title=\"\n<!-- @ -->\n\">a</p>",
+        "<p>{{ `\n<!-- @ -->\n` }}</p>",
+        "<textarea>\n<!-- @ -->\n</textarea>",
+        "<p>\n// @\n</p>",
+    ] {
+        assert_only_a_comment_silences(
+            "a11y-alt-text",
+            "web/Net.vue",
+            &format!("<template>\n<p>a</p> <!-- @ -->\n{image}\n</template>\n"),
+            &format!("<template>\n{text}\n{image}\n</template>\n"),
+        );
+    }
+    for block in [
+        "<style>\n.a { content: \"\\\n<!-- @ -->\"; }\n</style>",
+        "<style>\n.a { content: \"\\\n// @\"; }\n</style>",
+        "<docs>\n// @\n<!-- @ -->\n</docs>",
+    ] {
+        assert_only_a_comment_silences(
+            "a11y-alt-text",
+            "web/Net.vue",
+            &format!("<template>{image}</template>\n<style>\n/* // @ */\n</style>\n"),
+            &format!("<template>{image}</template>\n{block}\n"),
+        );
+    }
+}
+
+#[test]
+fn a_sql_marker_in_copy_data_or_another_language_is_text() {
+    let truncate = "TRUNCATE TABLE sessions;\n";
+    for text in [
+        "COPY notes (body) FROM stdin;\n-- @\n\\.\n",
+        "CREATE FUNCTION f() RETURNS text LANGUAGE plperl AS $$\nmy $s = q{\n-- @\n};\n$$;\n",
+        "CREATE FUNCTION f() RETURNS text AS $$\nmy $s = q{\n-- @\n};\n$$ LANGUAGE plperl;\n",
+    ] {
+        assert_only_a_comment_silences(
+            "sql-no-truncate-in-app",
+            "migrations/012.sql",
+            &format!("COPY notes (body) FROM stdin;\nit's\n\\.\n-- @\n{truncate}"),
+            &format!("{text}{truncate}"),
+        );
+    }
+}
+
+#[test]
+fn a_javascript_marker_in_jsx_text_is_text() {
+    let ip = "export const host = \"10.1.2.3\";\n";
+    assert_only_a_comment_silences(
+        "no-hardcoded-ip",
+        "web/net.js",
+        &format!("export const Note = () => <p>it's</p>;\n// @\n{ip}"),
+        &format!("export const Note = () => <p>\n// @\n</p>;\n{ip}"),
+    );
+}
+
+#[test]
+fn an_eslint_config_counts_only_in_a_comment() {
+    let (rule, file) = ("no-hardcoded-ip", "web/net.ts");
+    let ip = "export const host = \"10.1.2.3\";\n";
+    let config = format!("/* eslint {rule}: 0 */");
+    let comment = format!("{config}\n{ip}");
+    let text = format!("export const doc = `\n{config}\n`;\n{ip}");
+    assert!(positions(rule, file, &comment).is_empty());
+    assert_eq!(positions(rule, file, &text), ["4:22"]);
 }
 
 #[test]
@@ -1111,6 +1235,94 @@ fn a_file_outside_src_a_release_root_declares_ships() {
 }
 
 #[test]
+fn a_file_a_macro_or_a_conditional_path_loads_ships() {
+    // Another root gates the same file on `test`.
+    // The library's own declaration ships it.
+    let helper = shipped_defects();
+    let macro_rules = "macro_rules! modules { ($($item:tt)*) => { $($item)* } }\n";
+    let invoked = format!("{macro_rules}modules! {{ pub mod helper; }}\n");
+    // The shape of the `cfg-if` crate, without the dependency.
+    let cfg_if = "macro_rules! cfg_if {\n    \
+                  (if #[cfg($meta:meta)] { $($item:item)* }) => { $(#[cfg($meta)] $item)* };\n}\n\
+                  cfg_if! {\n    if #[cfg(unix)] {\n        pub mod helper;\n    }\n}\n";
+    let reloaded = "#[path = \"a.rs\"]\npub mod renamed;\npub mod a;\n";
+    let twin = "mod helper;";
+    let projects = [
+        (
+            "src/helper.rs",
+            twin,
+            "#[cfg_attr(not(test), path = \"helper.rs\")]\npub mod db;\n",
+        ),
+        ("src/helper.rs", twin, cfg_if),
+        ("src/helper.rs", twin, invoked.as_str()),
+        ("src/helper.rs", twin, "include!(\"helper.rs\");\n"),
+        (
+            "src/api/helper.rs",
+            "#[path = \"api/helper.rs\"]\nmod twin;",
+            "#[path = \"api\"]\npub mod inner {\n    pub mod helper;\n}\n",
+        ),
+        ("src/a/b.rs", "#[path = \"a/b.rs\"]\nmod twin;", reloaded),
+    ];
+    for (shipped, twin, library) in projects {
+        let main = format!("#[cfg(test)]\n{twin}\nfn main() {{}}\n");
+        let files = [
+            ("Cargo.toml", APP_MANIFEST),
+            ("src/lib.rs", library),
+            ("src/main.rs", main.as_str()),
+            ("src/db.rs", ""),
+            ("src/a.rs", "pub mod b;\n"),
+            ("src/b.rs", ""),
+            (shipped, helper.as_str()),
+        ];
+        assert_eq!(
+            rules_reporting(&files, shipped, &SHIP_RULES),
+            SHIP_RULES,
+            "{library}"
+        );
+    }
+}
+
+#[test]
+fn a_file_only_a_test_build_loads_does_not_ship() {
+    // `#[path]` keeps the gate of its item.
+    // So does an inline `mod`.
+    // `[[test]] path` builds a test target in any directory.
+    let helper = shipped_defects();
+    let test_target = format!("{APP_MANIFEST}\n[[test]]\nname = \"api\"\npath = \"it/api.rs\"\n");
+    let renamed = "#[cfg(test)]\n#[path = \"parse_tests.rs\"]\nmod tests;\n";
+    let renamed_first = "#[path = \"parse_tests.rs\"]\n#[cfg(test)]\nmod tests;\n";
+    let projects = [
+        ("src/parse_tests.rs", APP_MANIFEST, renamed),
+        ("src/parse_tests.rs", APP_MANIFEST, renamed_first),
+        (
+            "src/parse/unit.rs",
+            APP_MANIFEST,
+            "#[cfg(test)]\n#[path = \"parse/unit.rs\"]\nmod tests;\n",
+        ),
+        (
+            "src/parse/checks/helper.rs",
+            APP_MANIFEST,
+            "#[cfg(test)]\nmod checks {\n    mod helper;\n}\n",
+        ),
+        ("it/api.rs", test_target.as_str(), ""),
+    ];
+    for (file, manifest, parse) in projects {
+        let files = [
+            ("Cargo.toml", manifest),
+            ("src/lib.rs", "pub mod parse;\n"),
+            ("src/parse.rs", parse),
+            (file, helper.as_str()),
+        ];
+        let none: [&str; 0] = [];
+        assert_eq!(
+            rules_reporting(&files, file, &SHIP_RULES),
+            none,
+            "{file}: {parse}"
+        );
+    }
+}
+
+#[test]
 fn a_module_named_like_a_test_file_ships_unless_a_test_gate_declares_it() {
     // `src/test_*.rs` is a module, not a test target.
     // Only its `mod` declaration decides.
@@ -1166,6 +1378,60 @@ fn rust_unbounded_channel_reports_each_unbounded_constructor_and_no_bounded_one(
     let reported = |statement: &&str| {
         !positions("rust-unbounded-channel", "src/queue.rs", &body(statement)).is_empty()
     };
+    let missed: Vec<_> = unbounded.iter().filter(|s| !reported(s)).collect();
+    let flagged: Vec<_> = bounded.iter().filter(|s| reported(s)).collect();
+    assert_eq!((missed, flagged), (vec![], vec![]));
+}
+
+// A rename binds its own scope only.
+#[test]
+fn rust_unbounded_channel_follows_no_rename_of_another_scope() {
+    const IMPORT: &str = "use std::sync::mpsc;\n";
+    const CALL: &str = "pub fn run() {\n    let (tx, rx) = mpsc::channel();\n    \
+        for i in 0..3 {\n        let _ = tx.send(i);\n    }\n    drop(rx);\n}\n";
+    let call_of = |name: &str| CALL.replace("mpsc::channel", name);
+    let unbounded = [
+        // Another module, a child module, then another function.
+        format!("mod a {{\n    use crate::fake as mpsc;\n}}\n{IMPORT}{CALL}"),
+        format!("{IMPORT}{CALL}mod a {{\n    use crate::fake as mpsc;\n}}\n"),
+        format!("use crate::fake as mpsc;\nmod a {{\n{IMPORT}{CALL}}}\n"),
+        format!("{IMPORT}fn other() {{\n    use crate::fake as mpsc;\n}}\n{CALL}"),
+        // The nearer import wins.
+        format!(
+            "use crate::fake as mpsc;\n{}",
+            CALL.replace("let (tx", "use std::sync::mpsc;\n    let (tx")
+        ),
+        // One build sees the rename, the other does not.
+        format!("#[cfg(test)]\nuse crate::fake as mpsc;\n#[cfg(not(test))]\n{IMPORT}{CALL}"),
+        format!(
+            "#[cfg(test)]\nuse crate::fake as q;\n#[cfg(not(test))]\n\
+             use std::sync::mpsc as q;\n{}",
+            call_of("q::channel")
+        ),
+        format!(
+            "mod a {{\n    use crate::fake as unbounded;\n}}\n\
+             use flume::unbounded;\n{}",
+            call_of("unbounded")
+        ),
+        // A rename seen from a block and a nested function.
+        format!("use std::sync::mpsc as q;\n{}", call_of("q::channel")),
+        CALL.replace(
+            "let (tx, rx) = mpsc::channel();",
+            "use std::sync::mpsc as q;\n    fn make() -> u8 {\n        \
+             let (tx, rx) = q::channel();\n        for i in 0..3 {\n            \
+             let _ = tx.send(i);\n        }\n        drop(rx);\n        0\n    }\n    \
+             let (tx, rx) = (make(), 0);",
+        ),
+    ];
+    let bounded = [
+        format!("use crate::fake as mpsc;\n{CALL}"),
+        format!(
+            "{IMPORT}{}",
+            CALL.replace("let (tx", "use crate::fake as mpsc;\n    let (tx")
+        ),
+    ];
+    let reported =
+        |source: &&String| !positions("rust-unbounded-channel", "src/queue.rs", source).is_empty();
     let missed: Vec<_> = unbounded.iter().filter(|s| !reported(s)).collect();
     let flagged: Vec<_> = bounded.iter().filter(|s| reported(s)).collect();
     assert_eq!((missed, flagged), (vec![], vec![]));
@@ -1904,6 +2170,70 @@ fn working_tree_lints_untracked_files_but_not_ignored_ones() {
 }
 
 #[test]
+fn a_linted_file_that_is_not_utf8_is_refused_by_name() {
+    for file in [
+        "q.sql",
+        "a.css",
+        "c.yml",
+        "Dockerfile",
+        "nginx/site.conf",
+        "Net.vue",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"# caf\xe9\n").unwrap();
+        common::comply()
+            .current_dir(dir.path())
+            .arg(".")
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains("all clear").not())
+            .stderr(predicate::str::contains(file))
+            .stderr(predicate::str::contains("valid UTF-8"))
+            .stderr(predicate::str::contains("crashed unexpectedly").not());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_linted_file_without_read_permission_is_refused_by_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("q.sql");
+    fs::write(&file, "SELECT id FROM users;\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    common::comply()
+        .current_dir(dir.path())
+        .arg(".")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("q.sql"));
+}
+
+#[test]
+fn an_unread_path_comply_lints_nothing_of_stops_no_run() {
+    // A submodule can be named like a script.
+    // A staged file can be gone from the working tree.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    fs::create_dir_all(root.join("vendor")).unwrap();
+    fs::write(root.join("vendor/q.sql"), b"-- caf\xe9\n").unwrap();
+    fs::write(root.join("gone.sql"), "SELECT id FROM users;\n").unwrap();
+    git(root, &["add", "-A"]);
+    fs::remove_file(root.join("gone.sql")).unwrap();
+    fs::create_dir_all(root.join("three.css")).unwrap();
+    let submodule = format!("160000,{},three.css", "1".repeat(40));
+    git(root, &["update-index", "--add", "--cacheinfo", &submodule]);
+    common::comply()
+        .current_dir(root)
+        .arg("--staged")
+        .assert()
+        .success();
+}
+
+#[test]
 fn missing_type_aware_toolchain_is_an_instruction_not_a_crash_issue_8109() {
     // A TypeScript project with a tsconfig.json but no typescript-go API package
     // in its node_modules is every repo you clone. comply diagnoses that gap
@@ -2476,30 +2806,42 @@ fn clippy_toml_beside_dot_clippy_toml_is_an_error_naming_both() {
 #[cfg(unix)]
 #[test]
 fn cargo_shear_that_checks_nothing_is_an_error() {
+    shear_run("echo 'Error: Metadata error: `cargo metadata` exited with an error:'\nexit 2\n")
+        .code(2)
+        .stderr(predicate::str::contains("cargo shear could not check"))
+        .stderr(predicate::str::contains("It exited with 2"))
+        .stderr(predicate::str::contains("Metadata error"));
+}
+
+// Exit 1 announces a finding.
+#[cfg(unix)]
+#[test]
+fn cargo_shear_that_exits_1_without_a_finding_is_an_error() {
+    shear_run("echo '{\"findings\":[]}'\necho 'out of memory' >&2\nexit 1\n")
+        .code(2)
+        .stderr(predicate::str::contains("cargo shear could not check"))
+        .stderr(predicate::str::contains("It exited with 1"))
+        .stderr(predicate::str::contains("out of memory"));
+}
+
+/// Runs comply where `cargo shear` is the shell lines `shear`.
+#[cfg(unix)]
+fn shear_run(shear: &str) -> assert_cmd::assert::Assert {
     use std::os::unix::fs::PermissionsExt;
     let dir = rust_crate(&[("src/lib.rs", "pub fn f() {}\n")]);
     let bin = TempDir::new().unwrap();
-    let shear = bin.path().join("cargo-shear");
-    fs::write(
-        &shear,
-        "#!/bin/sh\ncase \"$*\" in *--version*) echo 'cargo-shear 1.14.0'; exit 0;; esac\n\
-         echo 'Error: Metadata error: `cargo metadata` exited with an error:'\nexit 2\n",
-    )
-    .unwrap();
-    fs::set_permissions(&shear, fs::Permissions::from_mode(0o755)).unwrap();
+    let script = bin.path().join("cargo-shear");
+    let version = "case \"$*\" in *--version*) echo 'cargo-shear 1.14.0'; exit 0;; esac";
+    fs::write(&script, format!("#!/bin/sh\n{version}\n{shear}")).unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut dirs = vec![bin.path().to_path_buf()];
     dirs.extend(std::env::split_paths(&path));
-
     common::comply()
         .current_dir(dir.path())
         .env("PATH", std::env::join_paths(dirs).unwrap())
         .arg(".")
         .assert()
-        .code(2)
-        .stderr(predicate::str::contains("cargo shear could not check"))
-        .stderr(predicate::str::contains("It exited with 2"))
-        .stderr(predicate::str::contains("Metadata error"));
 }
 
 // Plain clippy reads a member's own clippy.toml for that member.
@@ -3379,6 +3721,259 @@ fn clippy_that_cannot_compile_is_an_error_not_all_clear() {
         .stdout(predicate::str::contains("all clear").not())
         .stderr(predicate::str::contains("cargo clippy could not compile"))
         .stderr(predicate::str::contains("mismatched types"));
+}
+
+/// Crate `a`, and `b` which depends on it.
+/// `b` holds a `clippy::len_zero`.
+fn dependent_crates(files: &[(&str, &str)]) -> TempDir {
+    let mut tree = vec![
+        (
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\"]\nresolver = \"2\"\n",
+        ),
+        (
+            "a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("a/src/lib.rs", "pub const KEEP: u8 = 1;\n"),
+        (
+            "b/Cargo.toml",
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\na = { path = \"../a\" }\n",
+        ),
+        (
+            "b/src/lib.rs",
+            "pub fn is_none(v: &[u8]) -> bool {\n    a::KEEP == 1 && v.len() == 0\n}\n",
+        ),
+    ];
+    tree.extend_from_slice(files);
+    let dir = rust_crate(&tree);
+    fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@example.com"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-qm", "init"]);
+    dir
+}
+
+/// Comply over the staged lines `append` adds to `b`.
+fn staged_run(root: &std::path::Path, append: &str) -> assert_cmd::assert::Assert {
+    let lib = root.join("b/src/lib.rs");
+    let source = fs::read_to_string(&lib).unwrap();
+    fs::write(&lib, format!("{source}{append}")).unwrap();
+    git(root, &["add", "-A"]);
+    common::comply()
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .args(["--staged", "--diff-only"])
+        .assert()
+}
+
+const NEW_LEN_ZERO: &str =
+    "\n/// Holds nothing.\n#[must_use]\npub fn is_bare(v: &[u8]) -> bool {\n    v.len() == 0\n}\n";
+
+// A build script that panics warns about its own `panic!`.
+// That warning excused the failure of the whole run.
+#[test]
+fn clippy_stopped_by_a_build_script_that_panics_is_an_error() {
+    let dir = dependent_crates(&[(
+        "b/build.rs",
+        "//! Generates.\nfn main() {\n    panic!(\"protoc not found\")\n}\n",
+    )]);
+    staged_run(dir.path(), NEW_LEN_ZERO)
+        .code(2)
+        .stdout(predicate::str::contains("all clear").not())
+        .stderr(predicate::str::contains("protoc not found"));
+}
+
+// So did any warning of another crate.
+#[test]
+fn clippy_stopped_by_a_killed_build_script_is_an_error() {
+    let dir = dependent_crates(&[
+        ("a/src/lib.rs", "use std::fmt;\npub const KEEP: u8 = 1;\n"),
+        (
+            "b/build.rs",
+            "//! Dies.\nfn main() {\n    std::process::abort()\n}\n",
+        ),
+    ]);
+    staged_run(dir.path(), NEW_LEN_ZERO)
+        .code(2)
+        .stdout(predicate::str::contains("all clear").not())
+        .stderr(predicate::str::contains("cargo clippy could not compile"));
+}
+
+// `a` is not staged. Its denied lint is no finding.
+// Cargo then builds no `b`.
+#[test]
+fn clippy_stopped_by_a_denied_lint_of_another_crate_is_an_error() {
+    let dir = dependent_crates(&[(
+        "a/src/lib.rs",
+        "pub const KEEP: u8 = 1;\npub fn is_low(x: u32) -> bool {\n    x < 0\n}\n",
+    )]);
+    staged_run(dir.path(), NEW_LEN_ZERO)
+        .code(2)
+        .stdout(predicate::str::contains("all clear").not())
+        .stderr(predicate::str::contains("did not lint b"))
+        .stderr(predicate::str::contains("absurd_extreme_comparisons"));
+}
+
+/// Comply over a crate holding `files`, with its clippy findings.
+fn clippy_findings(files: &[(&str, &str)]) -> (Option<i32>, Vec<String>, String) {
+    let dir = rust_crate(files);
+    let output = common::comply()
+        .current_dir(dir.path())
+        .env("CARGO_TARGET_DIR", dir.path().join("target"))
+        .arg(".")
+        .output()
+        .unwrap();
+    let findings = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.contains("clippy::len_zero"))
+        .map(str::to_owned)
+        .collect();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    (output.status.code(), findings, stderr)
+}
+
+const LEN_ZERO: &str = "pub fn is_none(v: &[u8]) -> bool {\n    v.len() == 0\n}\n";
+
+#[test]
+fn denied_clippy_lint_stays_a_finding_at_every_level() {
+    let manifest = |lints: &str| {
+        format!(
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [workspace]\n{lints}"
+        )
+    };
+    for (attribute, lints) in [
+        ("", ""),
+        ("#![deny(clippy::len_zero)]\n", ""),
+        ("#![forbid(clippy::len_zero)]\n", ""),
+        ("#![deny(warnings)]\n", ""),
+        ("", "\n[lints.clippy]\nlen_zero = \"deny\"\n"),
+        ("", "\n[lints.clippy]\nlen_zero = \"forbid\"\n"),
+    ] {
+        let (code, findings, stderr) = clippy_findings(&[
+            ("Cargo.toml", &manifest(lints)),
+            ("src/lib.rs", &format!("{attribute}{LEN_ZERO}")),
+            (
+                "src/main.rs",
+                "fn main() {\n    println!(\"{}\", fixture::is_none(&[]));\n}\n",
+            ),
+        ]);
+        assert_eq!(code, Some(1), "{attribute}{lints}: {stderr}");
+        assert_eq!(findings.len(), 1, "{attribute}{lints}: {findings:?}");
+    }
+}
+
+// A denied lint stops the library the binary needs.
+#[test]
+fn denied_clippy_lint_does_not_hide_the_findings_behind_it() {
+    let (code, findings, stderr) = clippy_findings(&[
+        (
+            "src/lib.rs",
+            &format!("#![deny(clippy::len_zero)]\n{LEN_ZERO}"),
+        ),
+        (
+            "src/main.rs",
+            "fn main() {\n    let v: Vec<u8> = Vec::new();\n    \
+             println!(\"{} {}\", v.len() == 0, fixture::is_none(&v));\n}\n",
+        ),
+    ]);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert_eq!(findings.len(), 2, "{findings:?}");
+}
+
+// Capping the levels must not turn rustc's errors into silence.
+#[test]
+fn rustc_lint_denied_behind_a_denied_clippy_lint_is_an_error() {
+    for source in [
+        "#![deny(unused_variables)]\nfn main() {\n    let unread = 1;\n}\n",
+        "#![deny(warnings)]\nuse fixture::is_none;\nfn main() {}\n",
+    ] {
+        let (code, _, stderr) = clippy_findings(&[
+            (
+                "src/lib.rs",
+                &format!("#![deny(clippy::len_zero)]\n{LEN_ZERO}"),
+            ),
+            ("src/main.rs", source),
+        ]);
+        assert_eq!(code, Some(2), "{stderr}");
+        assert!(stderr.contains("unused"), "{stderr}");
+    }
+}
+
+/// `fixture` denies its unused dependency `idle`.
+/// `members` joins `idle` in the workspace.
+fn idle_dependency_manifest(members: &str) -> String {
+    format!(
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+         [lints.cargo]\nunused_dependencies = \"deny\"\n\n\
+         [dependencies]\nidle = {{ path = \"idle\" }}\n\n\
+         [workspace]\nmembers = [\"idle\"{members}]\n"
+    )
+}
+
+const IDLE: [(&str, &str); 2] = [
+    (
+        "idle/Cargo.toml",
+        "[package]\nname = \"idle\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    ),
+    ("idle/src/lib.rs", "//! Unused.\n"),
+];
+
+// From 1.100, cargo fails a run whose crates all built.
+#[test]
+fn denied_cargo_lint_does_not_hide_the_findings() {
+    let manifest = idle_dependency_manifest("");
+    for attribute in ["", "#![deny(clippy::len_zero)]\n"] {
+        let source = format!("{attribute}{LEN_ZERO}");
+        let mut files = vec![("Cargo.toml", manifest.as_str()), ("src/lib.rs", &source)];
+        files.extend(IDLE);
+        let (code, findings, stderr) = clippy_findings(&files);
+        assert_eq!(code, Some(1), "{attribute}: {stderr}");
+        assert_eq!(findings.len(), 1, "{attribute}: {findings:?}");
+    }
+}
+
+#[test]
+fn denied_cargo_lint_excuses_no_other_failure() {
+    let manifest = idle_dependency_manifest(", \"dies\"");
+    let mut files = vec![
+        ("Cargo.toml", manifest.as_str()),
+        ("src/lib.rs", LEN_ZERO),
+        (
+            "dies/Cargo.toml",
+            "[package]\nname = \"dies\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        ),
+        ("dies/src/lib.rs", "//! Never built.\n"),
+        (
+            "dies/build.rs",
+            "fn main() {\n    std::process::abort()\n}\n",
+        ),
+    ];
+    files.extend(IDLE);
+    let (code, _, stderr) = clippy_findings(&files);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("custom build command"), "{stderr}");
+}
+
+// A cargo config may deny warnings, or hide them.
+#[test]
+fn cargo_build_warnings_setting_does_not_change_the_findings() {
+    for setting in ["deny", "allow"] {
+        let (code, findings, stderr) = clippy_findings(&[
+            (
+                ".cargo/config.toml",
+                &format!("[build]\nwarnings = \"{setting}\"\n"),
+            ),
+            ("src/lib.rs", LEN_ZERO),
+        ]);
+        assert_eq!(code, Some(1), "{setting}: {stderr}");
+        assert_eq!(findings.len(), 1, "{setting}: {findings:?}");
+    }
 }
 
 /// A crate whose `sqlx::query!` asks a database at build time.
