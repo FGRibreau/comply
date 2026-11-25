@@ -227,6 +227,7 @@ fn sql_migration_rules_skip_test_dirs_and_host_code() {
 /// `source` is written at `file` in an empty project.
 fn positions(rule: &str, file: &str, source: &str) -> Vec<String> {
     let dir = TempDir::new().expect("failed to create temp dir");
+    common::without_type_aware_rules(dir.path());
     let path = dir.path().join(file);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, source).unwrap();
@@ -1183,6 +1184,7 @@ fn findings(files: &[(&str, &str)], rule: &str) -> Vec<String> {
 /// Each line leaves out the project root.
 fn report(files: &[(&str, &str)]) -> Vec<String> {
     let dir = TempDir::new().expect("failed to create temp dir");
+    common::without_type_aware_rules(dir.path());
     for (name, content) in files {
         let path = dir.path().join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
