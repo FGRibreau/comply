@@ -4024,6 +4024,53 @@ fn clippy_builds_a_sqlx_crate_from_its_query_cache() {
         .stdout(predicate::str::contains("clippy::len_zero"));
 }
 
+// Clippy stops at the denied lint of `low`.
+// The rustc pass reaches the query and names the cache.
+#[test]
+fn uncached_query_behind_a_denied_lint_names_the_cache() {
+    let dir = sqlx_crate();
+    let root = dir.path();
+    let edit = |file: &str, from: &str, to: &str| {
+        let path = root.join(file);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{text}");
+        fs::write(path, text.replace(from, to)).unwrap();
+    };
+    edit(
+        "Cargo.toml",
+        "[dependencies]\n",
+        "[dependencies]\nlow = { path = \"low\" }\n",
+    );
+    edit(
+        "Cargo.toml",
+        "[workspace]\n",
+        "[workspace]\nmembers = [\"low\"]\n",
+    );
+    edit("src/lib.rs", "DELETE FROM sessions", "DELETE FROM users");
+    fs::create_dir_all(root.join("low/src")).unwrap();
+    fs::write(
+        root.join("low/Cargo.toml"),
+        "[package]\nname = \"low\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("low/src/lib.rs"),
+        format!("#![deny(clippy::len_zero)]\n{LEN_ZERO}"),
+    )
+    .unwrap();
+    common::comply()
+        .arg(root)
+        .env("CARGO_TARGET_DIR", root.join("target"))
+        .env_remove("SQLX_OFFLINE")
+        .env_remove("DATABASE_URL")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "The `.sqlx` cache lacks queries of `sessions`",
+        ))
+        .stderr(predicate::str::contains("accepted no connection"));
+}
+
 #[test]
 fn fix_builds_a_sqlx_crate_from_its_query_cache() {
     let dir = sqlx_crate();
