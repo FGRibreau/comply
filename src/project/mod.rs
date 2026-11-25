@@ -2478,6 +2478,12 @@ pub struct CargoManifest {
     explicit_target_paths: Vec<PathBuf>,
     /// `[lib] path`, relative to `manifest_dir`.
     lib_path: Option<PathBuf>,
+    /// `[[bin]] path` fields, relative to `manifest_dir`.
+    bin_paths: Vec<PathBuf>,
+    /// `[[example]] path` fields, relative to `manifest_dir`.
+    example_paths: Vec<PathBuf>,
+    /// The files the package's targets reach, walked on first use.
+    module_reach: OnceLock<ModuleReach>,
     /// An async runtime (`tokio`, `async-std`, `futures`) is declared in any
     /// dependency section.
     async_runtime: bool,
@@ -2489,9 +2495,8 @@ pub struct CargoManifest {
     /// A derive-based error-handling library (`thiserror`, `snafu`, `miette`,
     /// `derive_more`, `error-stack`) is declared in any dependency section.
     error_derive_crate: bool,
-    /// `[package.metadata] cargo-fuzz = true`, or a fuzzing-runtime dependency
-    /// (`libfuzzer-sys`, `afl`, `honggfuzz`) is declared in any dependency
-    /// section — the crate is a fuzz harness.
+    /// The crate is a fuzz harness.
+    /// See [`CargoManifest::is_fuzz_crate`].
     fuzz_crate: bool,
     /// `[package].links` is set — the crate declares it links a native library.
     /// Cargo allows exactly one crate per native library to set this key, so its
@@ -2524,8 +2529,7 @@ impl CargoManifest {
     /// as async.
     const ASYNC_RUNTIMES: &'static [&'static str] = &["tokio", "async-std", "async_std", "futures"];
 
-    /// Fuzzing runtimes whose presence in any dependency section marks the crate
-    /// as a fuzz harness (cargo-fuzz `libfuzzer-sys`, AFL `afl`, honggfuzz).
+    /// Fuzzing engines: cargo-fuzz `libfuzzer-sys`, AFL `afl`, honggfuzz.
     const FUZZ_RUNTIMES: &'static [&'static str] = &["libfuzzer-sys", "afl", "honggfuzz"];
 
     /// Parse a `Cargo.toml`'s raw text. `manifest_dir` is the directory holding
@@ -2583,6 +2587,19 @@ impl CargoManifest {
             .and_then(toml::Value::as_str)
             .map(PathBuf::from);
 
+        let target_paths = |table: &str| -> Vec<PathBuf> {
+            value
+                .get(table)
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|target| target.get("path").and_then(toml::Value::as_str))
+                .map(PathBuf::from)
+                .collect()
+        };
+        let bin_paths = target_paths("bin");
+        let example_paths = target_paths("example");
+
         let async_runtime = ["dependencies", "dev-dependencies", "build-dependencies"]
             .iter()
             .filter_map(|section| value.get(section).and_then(toml::Value::as_table))
@@ -2603,11 +2620,17 @@ impl CargoManifest {
             .and_then(|metadata| metadata.get("cargo-fuzz"))
             .and_then(toml::Value::as_bool)
             .unwrap_or(false);
-        let fuzz_runtime_dep = ["dependencies", "dev-dependencies", "build-dependencies"]
-            .iter()
-            .filter_map(|section| value.get(section).and_then(toml::Value::as_table))
-            .any(|table| Self::FUZZ_RUNTIMES.iter().any(|rt| table.contains_key(*rt)));
-        let fuzz_crate = fuzz_metadata || fuzz_runtime_dep;
+        // A dev, build or optional engine stays out of the release build.
+        let fuzz_engine_required = value
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|deps| {
+                Self::FUZZ_RUNTIMES
+                    .iter()
+                    .filter_map(|engine| deps.get(*engine))
+                    .any(|spec| spec.get("optional").and_then(toml::Value::as_bool) != Some(true))
+            });
+        let fuzz_crate = fuzz_metadata || fuzz_engine_required;
 
         let no_std_category = value
             .get("package")
@@ -2649,6 +2672,9 @@ impl CargoManifest {
             has_bin_table,
             explicit_target_paths,
             lib_path,
+            bin_paths,
+            example_paths,
+            module_reach: OnceLock::new(),
             async_runtime,
             no_std_category,
             testing_crate,
@@ -2734,6 +2760,60 @@ impl CargoManifest {
             || self.declares_executable_at(file_path)
     }
 
+    /// True when the library or a binary links `file_path` by `mod` items.
+    /// See [`walk_module_tree`] for the declarations read.
+    #[must_use]
+    pub fn release_target_links(&self, file_path: &Path) -> bool {
+        let reach = self.module_reach();
+        !reach.complete || reach.release.contains(&self.package_relative(file_path))
+    }
+
+    /// True when the library, a binary or an example links `file_path`.
+    /// Tests and benches build with `cfg(test)`.
+    #[must_use]
+    pub fn non_test_target_links(&self, file_path: &Path) -> bool {
+        let reach = self.module_reach();
+        !reach.complete || reach.non_test.contains(&self.package_relative(file_path))
+    }
+
+    /// `file_path` relative to the manifest directory, without `.` segments.
+    fn package_relative(&self, file_path: &Path) -> PathBuf {
+        let relative = file_path
+            .strip_prefix(&self.manifest_dir)
+            .unwrap_or(file_path);
+        path_segments(relative).iter().collect()
+    }
+
+    /// The files the package's targets reach, walked once.
+    fn module_reach(&self) -> &ModuleReach {
+        self.module_reach.get_or_init(|| {
+            let lib = self.lib_path.clone();
+            let mut release_roots = vec![
+                lib.unwrap_or_else(|| PathBuf::from("src/lib.rs")),
+                PathBuf::from("src/main.rs"),
+            ];
+            release_roots.extend(self.bin_paths.iter().cloned());
+            release_roots.extend(auto_target_roots(&self.manifest_dir, "src/bin"));
+            // An example left out by `autoexamples = false` is no test code either.
+            let mut example_roots = self.example_paths.clone();
+            example_roots.extend(auto_target_roots(&self.manifest_dir, "examples"));
+
+            let mut release = FxHashSet::default();
+            let mut complete = release_roots
+                .iter()
+                .all(|root| walk_module_tree(&self.manifest_dir, root, &mut release));
+            let mut non_test = release.clone();
+            complete &= example_roots
+                .iter()
+                .all(|root| walk_module_tree(&self.manifest_dir, root, &mut non_test));
+            ModuleReach {
+                release,
+                non_test,
+                complete,
+            }
+        })
+    }
+
     /// True when the crate builds a library target: a `[lib]` table is declared,
     /// or `src/lib.rs` exists next to the manifest. The inverse of
     /// [`is_binary_only`] — a crate is a library when it exposes a `[lib]`
@@ -2786,14 +2866,11 @@ impl CargoManifest {
         self.testing_crate
     }
 
-    /// True when the crate is a fuzz harness, identified by
-    /// `[package.metadata] cargo-fuzz = true` or a dependency on a fuzzing
-    /// runtime (`libfuzzer-sys`, `afl`, `honggfuzz`). A fuzz harness feeds
-    /// arbitrary bytes to a call and deliberately discards the `Result` — only
-    /// a panic/crash matters — so `let _ = f(input)` and `panic!` are the
-    /// idiomatic crash-signaling mechanisms, regardless of the harness's
-    /// directory layout (cargo-fuzz `fuzz/fuzzers/`, AFL
-    /// `fuzz-afl/{fuzzers,reproducers}/`, or the classic `fuzz_targets/`).
+    /// True when the crate is a fuzz harness, whatever its layout.
+    /// It sets `[package.metadata] cargo-fuzz = true`.
+    /// Or `[dependencies]` requires a fuzzing engine.
+    /// A dev, build or optional engine leaves a crate shipping.
+    /// In a harness, `let _ = f(input)` and `panic!` signal crashes.
     pub fn is_fuzz_crate(&self) -> bool {
         self.fuzz_crate
     }
@@ -3297,6 +3374,10 @@ pub struct ProjectCtx {
     // answer is identical for every file under the same package.json.
     path_frameworks_cache: Mutex<FxHashMap<PathBuf, Vec<&'static FrameworkDef>>>,
 
+    // The React Router app of each package that detects React Router, keyed
+    // by its manifest directory. Read once: every file of the package asks.
+    react_router_apps: Mutex<FxHashMap<PathBuf, Arc<crate::frameworks::react_router::App>>>,
+
     // `lib.entryFile` declared in each `ng-package.json`, keyed by that file's
     // directory. ng-packagr Angular libraries declare their public-API entry
     // here, not in `package.json` `main`/`exports` (those are emitted to the
@@ -3387,8 +3468,9 @@ pub struct ProjectCtx {
     // "Is this `.rs` file compiled only under `cfg(test)`?" — keyed by the file
     // path asked about. Answering walks the `mod` declaration chain up to the
     // crate root, reading one parent module file per link off disk, so the
-    // answer is memoized. See `rust_file_is_cfg_test_gated`.
-    rust_cfg_test_gated_cache: Mutex<FxHashMap<PathBuf, bool>>,
+    // answer is memoized, per path and per reading of the gate. See
+    // `rust_file_is_cfg_test_gated` and `rust_file_requires_cfg_test`.
+    rust_cfg_test_gated_cache: Mutex<FxHashMap<(PathBuf, bool), bool>>,
 
     // "Does this package register a global rate-limit middleware?" — i.e. an
     // `app.use(<rateLimiter>)` / `router.use(<rateLimiter>)` whose argument is a
@@ -4091,6 +4173,31 @@ impl ProjectCtx {
         detected
     }
 
+    /// The React Router app owning `path`: the one of its nearest
+    /// `package.json`, when that package detects React Router.
+    pub fn react_router_app(
+        &self,
+        path: &Path,
+    ) -> Option<Arc<crate::frameworks::react_router::App>> {
+        if !self
+            .frameworks_for_path(path)
+            .iter()
+            .any(|fw| fw.name == "react-router")
+        {
+            return None;
+        }
+        let manifest_dir = self.nearest_package_json_dir(path)?;
+        if let Some(app) = self.react_router_apps.lock().unwrap().get(&manifest_dir) {
+            return Some(Arc::clone(app));
+        }
+        let app = Arc::new(crate::frameworks::react_router::App::read(&manifest_dir));
+        self.react_router_apps
+            .lock()
+            .unwrap()
+            .insert(manifest_dir, Arc::clone(&app));
+        Some(app)
+    }
+
     /// Magic export names recognized for `path`: the union of the root-detected
     /// frameworks' magic exports and those of the framework owning `path` via its
     /// nearest `package.json`. A magic export (Next.js `metadata`/`default`,
@@ -4104,6 +4211,7 @@ impl ProjectCtx {
             names.extend(fw.magic_exports.names.iter().map(String::as_str));
         }
         self.extend_route_magic_exports(path, &mut names);
+        self.extend_react_router_exports(path, &mut names);
         if self.is_vitest_global_setup_file(path) {
             names.extend(VITEST_GLOBAL_SETUP_EXPORTS.iter().copied());
         }
@@ -4321,6 +4429,31 @@ impl ProjectCtx {
                         .iter()
                         .map(String::as_str),
                 );
+            }
+        }
+    }
+
+    /// Add the exports React Router reads by name from `path` when its app
+    /// loads it as a route module, the root route, the route config or the
+    /// server entry. A same-named export in any other module stays flaggable.
+    fn extend_react_router_exports(&self, path: &Path, names: &mut FxHashSet<&str>) {
+        let Some(app) = self.react_router_app(path) else {
+            return;
+        };
+        let Some(react_router) = crate::frameworks::get_framework("react-router") else {
+            return;
+        };
+        let exports = &react_router.route_magic_exports;
+        let is = |file: &Option<PathBuf>| file.as_deref() == Some(path);
+        let read_by_name = [
+            (app.route_modules.contains(path), &exports.route_files),
+            (is(&app.root), &exports.root_route),
+            (is(&app.route_config), &exports.route_config),
+            (is(&app.server_entry), &exports.server_entry),
+        ];
+        for (applies, exports) in read_by_name {
+            if applies {
+                names.extend(exports.iter().map(String::as_str));
             }
         }
     }
@@ -6041,14 +6174,32 @@ impl ProjectCtx {
     /// whose provenance is unknown stays treated as production code. Memoized
     /// per queried path.
     pub fn rust_file_is_cfg_test_gated(&self, path: &Path) -> bool {
-        if let Some(&cached) = self.rust_cfg_test_gated_cache.lock().unwrap().get(path) {
+        self.rust_module_chain_gated(path, false)
+    }
+
+    /// Like [`Self::rust_file_is_cfg_test_gated`], but a gate counts only when
+    /// its predicate requires `test` (see `rust_helpers::cfg_requires`).
+    /// `#[cfg(any(test, feature = "x"))] mod m;` builds `m` with the feature
+    /// alone, so it does not count.
+    pub fn rust_file_requires_cfg_test(&self, path: &Path) -> bool {
+        self.rust_module_chain_gated(path, true)
+    }
+
+    fn rust_module_chain_gated(&self, path: &Path, requires: bool) -> bool {
+        let key = (path.to_path_buf(), requires);
+        if let Some(&cached) = self.rust_cfg_test_gated_cache.lock().unwrap().get(&key) {
             return cached;
         }
-        let is_gated = rust_module_chain_is_cfg_test_gated(path);
+        let gate = if requires {
+            crate::rules::rust_helpers::cfg_requires
+        } else {
+            crate::rules::rust_helpers::cfg_gates_compilation
+        };
+        let is_gated = rust_module_chain_is_cfg_test_gated(path, gate);
         self.rust_cfg_test_gated_cache
             .lock()
             .unwrap()
-            .insert(path.to_path_buf(), is_gated);
+            .insert(key, is_gated);
         is_gated
     }
 
@@ -7288,28 +7439,45 @@ pub(crate) fn rust_module_parent_candidates(path: &Path) -> Option<(String, Vec<
 /// bound only caps the disk reads a pathologically deep layout would cost.
 pub(crate) const RUST_MODULE_CHAIN_MAX_DEPTH: usize = 32;
 
-/// True when some link in the chain of `mod` declarations reaching `path` from
-/// the crate root is gated on `cfg(test)`. Walks child → parent, reading each
-/// parent module file off disk; stops at the crate root, at the first
-/// unresolvable link, or at the depth cap.
-fn rust_module_chain_is_cfg_test_gated(path: &Path) -> bool {
-    let mut current = path.to_path_buf();
+/// A reading of a `cfg` gate on `test`: `rust_helpers::cfg_gates_compilation`
+/// or `rust_helpers::cfg_requires`.
+type CfgTestGate = fn(tree_sitter::Node, &[u8], &str) -> bool;
+
+/// True when only test builds reach `path` by `mod` declarations.
+/// Each declaring parent gates it on `test`, or is test-only.
+/// A crate root or an undeclared file ships.
+fn rust_module_chain_is_cfg_test_gated(path: &Path, gate: CfgTestGate) -> bool {
+    let mut frontier = vec![path.to_path_buf()];
+    let mut seen = FxHashSet::default();
     for _ in 0..RUST_MODULE_CHAIN_MAX_DEPTH {
-        let Some((module_name, candidates)) = rust_module_parent_candidates(&current) else {
-            return false;
-        };
-        let declaration = candidates.into_iter().find_map(|candidate| {
-            let src = std::fs::read_to_string(&candidate).ok()?;
-            let gated = source_gates_module_on_cfg_test(&src, &module_name)?;
-            Some((candidate, gated))
-        });
-        let Some((parent_file, is_gated)) = declaration else {
-            return false;
-        };
-        if is_gated {
+        let mut ungated_parents = Vec::new();
+        for file in &frontier {
+            let Some((module_name, candidates)) = rust_module_parent_candidates(file) else {
+                return false;
+            };
+            let declarations: Vec<(PathBuf, bool)> = candidates
+                .into_iter()
+                .filter_map(|candidate| {
+                    let src = std::fs::read_to_string(&candidate).ok()?;
+                    let gated = source_gates_module_on_cfg_test(&src, &module_name, gate)?;
+                    Some((candidate, gated))
+                })
+                .collect();
+            if declarations.is_empty() {
+                return false;
+            }
+            ungated_parents.extend(
+                declarations
+                    .into_iter()
+                    .filter(|(_, gated)| !gated)
+                    .map(|(parent, _)| parent)
+                    .filter(|parent| seen.insert(parent.clone())),
+            );
+        }
+        if ungated_parents.is_empty() {
             return true;
         }
-        current = parent_file;
+        frontier = ungated_parents;
     }
     false
 }
@@ -7336,17 +7504,165 @@ fn source_declares_module_private(parent_src: &str, name: &str) -> Option<bool> 
 }
 
 /// Whether `parent_src` gates its file-backed module `mod <name>;` on
-/// `cfg(test)`: `Some(true)` when the declaration carries a `cfg` predicate
-/// activating `test` or sits in a file headed by `#![cfg(test)]`, `Some(false)`
-/// when neither does, `None` when the module is not declared here (so the caller
-/// tries the next candidate parent file).
-fn source_gates_module_on_cfg_test(parent_src: &str, name: &str) -> Option<bool> {
+/// `cfg(test)`, as `gate` reads it: `Some(true)` when the declaration carries
+/// such a `cfg` predicate or sits in a file headed by `#![cfg(test)]`,
+/// `Some(false)` when neither does, `None` when the module is not declared here
+/// (so the caller tries the next candidate parent file).
+fn source_gates_module_on_cfg_test(
+    parent_src: &str,
+    name: &str,
+    gate: CfgTestGate,
+) -> Option<bool> {
     let tree = parse_rust_source(parent_src)?;
     let bytes = parent_src.as_bytes();
     let decl = find_file_backed_mod(tree.root_node(), name, bytes)?;
-    Some(crate::rules::rust_helpers::cfg_gates_compilation(
-        decl, bytes, "test",
-    ))
+    Some(gate(decl, bytes, "test"))
+}
+
+/// Ceiling on the files one package's module walk reads.
+const MODULE_TREE_MAX_FILES: usize = 16_384;
+
+/// The files a package's targets reach by `mod` items.
+/// Paths are relative to the manifest directory.
+#[derive(Debug, Clone)]
+struct ModuleReach {
+    /// Reached from the library or a binary.
+    release: FxHashSet<PathBuf>,
+    /// Reached from those or from an example.
+    non_test: FxHashSet<PathBuf>,
+    /// False when a walk stopped at [`MODULE_TREE_MAX_FILES`].
+    /// Every file then counts as reached.
+    complete: bool,
+}
+
+/// Add to `reached` the files that `root` loads by ungated `mod` items.
+/// Paths are relative to `manifest_dir`.
+/// See [`declared_module_files`] for how Rust resolves them.
+/// False when `reached` outgrows [`MODULE_TREE_MAX_FILES`].
+fn walk_module_tree(manifest_dir: &Path, root: &Path, reached: &mut FxHashSet<PathBuf>) -> bool {
+    // A crate root owns its directory, as a `mod.rs` does.
+    let mut pending: Vec<(PathBuf, bool, usize)> = fold_relative(root)
+        .map(|root| (root, true, 0))
+        .into_iter()
+        .collect();
+    while let Some((file, owns_dir, depth)) = pending.pop() {
+        if !manifest_dir.join(&file).is_file() || !reached.insert(file.clone()) {
+            continue;
+        }
+        if reached.len() > MODULE_TREE_MAX_FILES {
+            return false;
+        }
+        let Ok(src) = std::fs::read_to_string(manifest_dir.join(&file)) else {
+            continue;
+        };
+        if depth >= RUST_MODULE_CHAIN_MAX_DEPTH {
+            continue;
+        }
+        let Some(tree) = parse_rust_source(&src) else {
+            continue;
+        };
+        pending.extend(
+            declared_module_files(&file, owns_dir, tree.root_node(), src.as_bytes())
+                .into_iter()
+                .filter_map(|(child, child_owns_dir)| {
+                    Some((
+                        fold_relative(&child)?,
+                        child_owns_dir,
+                        depth.saturating_add(1),
+                    ))
+                }),
+        );
+    }
+    true
+}
+
+/// The files the ungated `mod` items of `file` may load.
+/// Each comes with whether it owns its directory.
+///
+/// - `mod a;` loads `a.rs` or `a/mod.rs` from the module's directory.
+/// - That is the file's directory for a `mod.rs` or a crate root.
+/// - Another file `x.rs` keeps its modules in `x/`.
+/// - `#[path = "p"]` loads `p` from the file's directory, and owns its own.
+/// - An inline `mod b { … }` adds `b/` for the items inside it.
+fn declared_module_files(
+    file: &Path,
+    owns_dir: bool,
+    root: tree_sitter::Node,
+    source: &[u8],
+) -> Vec<(PathBuf, bool)> {
+    let dir = file.parent().unwrap_or(Path::new(""));
+    let module_dir = match file.file_stem() {
+        Some(stem) if !owns_dir && file.file_name() != Some(OsStr::new("mod.rs")) => dir.join(stem),
+        _ => dir.to_path_buf(),
+    };
+    use crate::rules::rust_helpers::{cfg_requires, find_outer_attribute};
+    let mut found = Vec::new();
+    let mut scopes = vec![(root, PathBuf::new())];
+    while let Some((scope, inline)) = scopes.pop() {
+        let mut cursor = scope.walk();
+        for item in scope.named_children(&mut cursor) {
+            if item.kind() != "mod_item" || cfg_requires(item, source, "test") {
+                continue;
+            }
+            let Some(name) = item
+                .child_by_field_name("name")
+                .and_then(|name| name.utf8_text(source).ok())
+                .map(|name| name.trim_start_matches("r#"))
+            else {
+                continue;
+            };
+            if let Some(body) = item.child_by_field_name("body") {
+                scopes.push((body, inline.join(name)));
+                continue;
+            }
+            let path = find_outer_attribute(item, source, attr_is_path_override)
+                .and_then(|attribute| attribute.split('"').nth(1));
+            match path {
+                Some(path) if inline.as_os_str().is_empty() => found.push((dir.join(path), true)),
+                Some(path) => found.push((module_dir.join(&inline).join(path), true)),
+                None => {
+                    let parent = module_dir.join(&inline);
+                    found.push((parent.join(format!("{name}.rs")), false));
+                    found.push((parent.join(name).join("mod.rs"), false));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// `path` with its `.` and `..` segments folded.
+/// `None` when it climbs above its start.
+fn fold_relative(path: &Path) -> Option<PathBuf> {
+    let mut folded = PathBuf::new();
+    for segment in path_segments(path) {
+        if segment != ".." {
+            folded.push(segment);
+        } else if !folded.pop() {
+            return None;
+        }
+    }
+    Some(folded)
+}
+
+/// The targets Cargo finds in `dir`: each `*.rs` and each `*/main.rs`.
+/// Paths are relative to `manifest_dir`.
+fn auto_target_roots(manifest_dir: &Path, dir: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(manifest_dir.join(dir)) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .take(MODULE_TREE_MAX_FILES)
+        .map(|entry| {
+            let root = Path::new(dir).join(entry.file_name());
+            if root.extension().is_some_and(|ext| ext == "rs") {
+                root
+            } else {
+                root.join("main.rs")
+            }
+        })
+        .collect()
 }
 
 /// Parse `src` with the Rust grammar, or `None` when the grammar cannot be
@@ -10242,6 +10558,97 @@ tokio = "1"
         );
     }
 
+    // A fuzz harness requires its engine to build.
+    // A dev, build or optional engine leaves the crate shipping.
+    #[test]
+    fn cargo_manifest_is_a_fuzz_crate_only_when_its_build_needs_the_engine() {
+        let dir = PathBuf::from("/crate");
+        let fuzz = |sections: &str| {
+            let toml = format!("[package]\nname = \"app\"\n{sections}");
+            CargoManifest::parse(&toml, dir.clone())
+                .unwrap()
+                .is_fuzz_crate()
+        };
+        for engine in ["libfuzzer-sys", "afl", "honggfuzz"] {
+            assert!(
+                fuzz(&format!("[dependencies]\n{engine} = \"0.4\"\n")),
+                "{engine}"
+            );
+            assert!(
+                !fuzz(&format!("[dev-dependencies]\n{engine} = \"0.4\"\n")),
+                "{engine}"
+            );
+            assert!(
+                !fuzz(&format!("[build-dependencies]\n{engine} = \"0.4\"\n")),
+                "{engine}"
+            );
+        }
+        assert!(!fuzz(
+            "[dependencies]\nafl = { version = \"0.15\", optional = true }\n"
+        ));
+        assert!(fuzz(
+            "[dependencies]\nafl = { version = \"0.15\", optional = false }\n"
+        ));
+        assert!(fuzz("[dependencies]\nafl = { version = \"0.15\" }\n"));
+        assert!(fuzz("[package.metadata]\ncargo-fuzz = true\n"));
+        assert!(!fuzz("[dependencies]\nserde = \"1\"\n"));
+    }
+
+    // `path =` places a shipped root anywhere.
+    // Its ungated `mod` items ship with it.
+    #[test]
+    fn cargo_manifest_release_target_links_the_modules_of_a_declared_root() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let files = [
+            (
+                "examples/server.rs",
+                "mod auth;\n#[cfg(test)]\nmod fake;\nfn main() {}\n",
+            ),
+            ("examples/auth/mod.rs", "mod jwt;\n"),
+            ("examples/auth/jwt.rs", ""),
+            ("examples/fake.rs", ""),
+            ("examples/demo.rs", "fn main() {}\n"),
+            ("core/entry.rs", "mod store;\n"),
+            ("core/store.rs", "mod disk;\n"),
+            ("core/store/disk.rs", ""),
+        ];
+        for (rel, src) in files {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, src).unwrap();
+        }
+        let toml = "[package]\nname = \"app\"\n[lib]\npath = \"core/entry.rs\"\n\
+                    [[bin]]\nname = \"server\"\npath = \"examples/server.rs\"\n\
+                    [[example]]\nname = \"demo\"\npath = \"examples/demo.rs\"\n";
+        let manifest = CargoManifest::parse(toml, dir.path().to_path_buf()).unwrap();
+        let links = |rel: &str| manifest.release_target_links(&dir.path().join(rel));
+        for shipped in [
+            "examples/server.rs",
+            "examples/auth/mod.rs",
+            "examples/auth/jwt.rs",
+            "core/entry.rs",
+            "core/store.rs",
+            "core/store/disk.rs",
+        ] {
+            assert!(links(shipped), "{shipped}");
+        }
+        for left_out in [
+            "examples/fake.rs",
+            "examples/demo.rs",
+            "examples/auth/mod.txt",
+        ] {
+            assert!(!links(left_out), "{left_out}");
+        }
+        assert!(manifest.non_test_target_links(&dir.path().join("examples/demo.rs")));
+        let unlisted = CargoManifest::parse("[package]\nname = \"app\"\n", dir.path().into());
+        assert!(
+            !unlisted
+                .unwrap()
+                .release_target_links(&dir.path().join("examples/server.rs"))
+        );
+    }
+
     #[test]
     fn cargo_manifest_declares_executable_at_explicit_target_path() {
         let dir = PathBuf::from("/crate");
@@ -10915,67 +11322,73 @@ prost-build = "0.13"
 
     #[test]
     fn source_gates_module_on_cfg_test_reads_the_declaration_gate() {
-        assert_eq!(
-            source_gates_module_on_cfg_test("#[cfg(test)]\nmod unit;", "unit"),
-            Some(true)
-        );
+        use crate::rules::rust_helpers::cfg_gates_compilation;
+        let lax = |src: &str, name: &str| {
+            source_gates_module_on_cfg_test(src, name, cfg_gates_compilation)
+        };
+        assert_eq!(lax("#[cfg(test)]\nmod unit;", "unit"), Some(true));
         // Compound predicates activating `test` count too.
         assert_eq!(
-            source_gates_module_on_cfg_test("#[cfg(all(test, unix))]\nmod unit;", "unit"),
+            lax("#[cfg(all(test, unix))]\nmod unit;", "unit"),
             Some(true)
         );
         // A `#![cfg(test)]` file header gates every module it declares.
-        assert_eq!(
-            source_gates_module_on_cfg_test("#![cfg(test)]\nmod unit;", "unit"),
-            Some(true)
-        );
+        assert_eq!(lax("#![cfg(test)]\nmod unit;", "unit"), Some(true));
         // No attribute activating `test` → the file ships in release builds.
-        assert_eq!(
-            source_gates_module_on_cfg_test("mod unit;", "unit"),
-            Some(false)
-        );
-        assert_eq!(
-            source_gates_module_on_cfg_test("#[cfg(not(test))]\nmod unit;", "unit"),
-            Some(false)
-        );
+        assert_eq!(lax("mod unit;", "unit"), Some(false));
+        assert_eq!(lax("#[cfg(not(test))]\nmod unit;", "unit"), Some(false));
         // `cfg_attr` applies another attribute conditionally; the module itself
         // is compiled either way, so it is not a gate.
         assert_eq!(
-            source_gates_module_on_cfg_test(
-                "#[cfg_attr(test, allow(dead_code))]\nmod unit;",
-                "unit"
-            ),
+            lax("#[cfg_attr(test, allow(dead_code))]\nmod unit;", "unit"),
             Some(false)
         );
         // A feature *value* that spells `test` is not the `test` cfg option.
         assert_eq!(
-            source_gates_module_on_cfg_test("#[cfg(feature = \"test-util\")]\nmod unit;", "unit"),
+            lax("#[cfg(feature = \"test-util\")]\nmod unit;", "unit"),
             Some(false)
         );
         // Not declared here → the caller tries the next candidate parent file.
-        assert_eq!(source_gates_module_on_cfg_test("mod other;", "unit"), None);
+        assert_eq!(lax("mod other;", "unit"), None);
         // An inline module is not the parent of a split file.
-        assert_eq!(
-            source_gates_module_on_cfg_test("#[cfg(test)]\nmod unit {}", "unit"),
-            None
-        );
+        assert_eq!(lax("#[cfg(test)]\nmod unit {}", "unit"), None);
         // Nesting adds a path component: `mod harness { mod unit; }` backs
         // `<dir>/harness/unit.rs`, never the `<dir>/unit.rs` being walked.
         assert_eq!(
-            source_gates_module_on_cfg_test(
-                "#[cfg(test)]\nmod harness {\n    mod unit;\n}",
-                "unit"
-            ),
+            lax("#[cfg(test)]\nmod harness {\n    mod unit;\n}", "unit"),
             None
         );
         // A `#[path]` override decouples the module name from the file backing
         // it, so the declaration says nothing about `<dir>/unit.rs`.
         assert_eq!(
-            source_gates_module_on_cfg_test(
-                "#[cfg(test)]\n#[path = \"stubs/u.rs\"]\nmod unit;",
-                "unit"
-            ),
+            lax("#[cfg(test)]\n#[path = \"stubs/u.rs\"]\nmod unit;", "unit"),
             None
+        );
+    }
+
+    #[test]
+    fn source_gates_module_on_cfg_test_can_require_test() {
+        use crate::rules::rust_helpers::cfg_requires;
+        let requires =
+            |src: &str, name: &str| source_gates_module_on_cfg_test(src, name, cfg_requires);
+        assert_eq!(requires("#[cfg(test)]\nmod unit;", "unit"), Some(true));
+        assert_eq!(
+            requires("#[cfg(all(test, unix))]\nmod unit;", "unit"),
+            Some(true)
+        );
+        assert_eq!(requires("#![cfg(test)]\nmod unit;", "unit"), Some(true));
+        // The feature alone builds the module.
+        assert_eq!(
+            requires("#[cfg(any(test, feature = \"seed\"))]\nmod unit;", "unit"),
+            Some(false)
+        );
+        assert_eq!(
+            requires("#[cfg(not(test))]\nmod unit;", "unit"),
+            Some(false)
+        );
+        assert_eq!(
+            requires("#[cfg_attr(test, allow(dead_code))]\nmod unit;", "unit"),
+            Some(false)
         );
     }
 
@@ -11032,6 +11445,41 @@ prost-build = "0.13"
         fs::write(&leaf, "").unwrap();
 
         assert!(ProjectCtx::empty().rust_file_is_cfg_test_gated(&leaf));
+    }
+
+    // The library and the binary both declare modules.
+    // One ungated chain makes a file ship.
+    #[test]
+    fn rust_file_requires_cfg_test_only_when_every_declaration_does() {
+        use std::fs;
+        let dir = tempfile::TempDir::new().unwrap();
+        let files = [
+            (
+                "src/lib.rs",
+                "#[cfg(test)]\nmod helper;\n#[cfg(test)]\nmod fake;\nmod deep;\n",
+            ),
+            (
+                "src/main.rs",
+                "mod helper;\n#[cfg(test)]\nmod fake;\n#[cfg(test)]\nmod deep;\n",
+            ),
+            ("src/helper.rs", ""),
+            ("src/fake.rs", ""),
+            ("src/deep/mod.rs", "mod leaf;\n"),
+            ("src/deep/leaf.rs", ""),
+            ("src/orphan.rs", ""),
+        ];
+        for (rel, src) in files {
+            let path = dir.path().join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, src).unwrap();
+        }
+        let ctx = ProjectCtx::empty();
+        let requires = |rel: &str| ctx.rust_file_requires_cfg_test(&dir.path().join(rel));
+        assert!(!requires("src/helper.rs"));
+        assert!(requires("src/fake.rs"));
+        assert!(!requires("src/deep/leaf.rs"));
+        assert!(!requires("src/orphan.rs"));
+        assert!(!ctx.rust_file_is_cfg_test_gated(&dir.path().join("src/helper.rs")));
     }
 
     #[test]

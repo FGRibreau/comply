@@ -69,8 +69,10 @@ pub struct CargoTarget {
 pub struct RustcDiagnostic {
     #[serde(default)]
     pub message: String,
-    /// `error`, `warning`, `note`… An `error` without a `clippy::` code
-    /// stopped the build: clippy linted nothing past it.
+    /// `error`, `warning`, `note`, `help`.
+    /// An `error` without a `clippy::` code stopped the build.
+    /// Clippy linted nothing past it.
+    /// A `children` entry carries `note`, `help` or `warning`.
     #[serde(default)]
     pub level: String,
     /// rustc's own rendering, file and line included.
@@ -110,6 +112,21 @@ pub struct RustcSpan {
     pub column_start: usize,
     #[serde(default)]
     pub is_primary: bool,
+    /// The source lines the span covers.
+    #[serde(default)]
+    pub text: Vec<RustcSpanLine>,
+    /// The fix a `help` child proposes, e.g. the key a typo meant.
+    #[serde(default)]
+    pub suggested_replacement: Option<String>,
+    #[serde(default, flatten)]
+    pub _extra: IgnoredAny,
+}
+
+/// External wire format mirror — see comply:rust-serde-deny-unknown-fields.
+#[derive(Debug, Deserialize)]
+pub struct RustcSpanLine {
+    #[serde(default)]
+    pub text: String,
     #[serde(default, flatten)]
     pub _extra: IgnoredAny,
 }

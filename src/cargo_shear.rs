@@ -88,58 +88,63 @@ fn lint_workspace(workspace: &Path) -> Result<Vec<Diagnostic>> {
         .current_dir(workspace)
         .output()
         .with_context(|| format!("failed to invoke `cargo shear` in {}", workspace.display()))?;
-    let report = read_report(&output.stdout, &output.stderr, workspace)?;
+    let report =
+        read_report(output.status.code(), &output.stdout, &output.stderr).map_err(|failure| {
+            crate::toolchain::ToolchainError::Unusable {
+                what: format!(
+                    "cargo shear could not check {}; no dependency was checked.\n{failure}",
+                    workspace.display()
+                ),
+            }
+        })?;
     convert_findings(report.findings, workspace)
 }
 
-/// How many lines of the tool's own words a refusal quotes.
-const QUOTED_LINES: usize = 5;
+/// Cap, in characters, on the quoted `cargo shear` output.
+const OUTPUT_EXCERPT_CHARS: usize = 2000;
 
-/// The shear report, or the refusal of a run comply can draw nothing from.
-///
-/// Two silences used to read as a clean workspace. `cargo shear --format=json`
-/// prints `{"findings":[]}` when it finds nothing, so an empty stdout is never a
-/// result: it is a run that stopped before reporting (unreadable manifest, broken
-/// workspace) and examined no dependency. Output serde refuses is just as blind —
-/// the findings it carried, if any, never reached comply.
-fn read_report(stdout: &[u8], stderr: &[u8], workspace: &Path) -> Result<ShearReport> {
-    if stdout.is_empty() {
-        return Err(unusable(
-            workspace,
-            "reported nothing",
-            &first_lines(stderr),
-        ));
+/// Why `cargo shear` checked nothing.
+#[derive(Debug, thiserror::Error)]
+enum ShearFailure {
+    #[error(
+        "It exited with {}:\n{output}",
+        .code.map_or_else(|| "a signal".to_owned(), |code| code.to_string())
+    )]
+    Exit { code: Option<i32>, output: String },
+    #[error("Its report is unreadable ({source}):\n{output}")]
+    Unreadable {
+        source: serde_json::Error,
+        output: String,
+    },
+}
+
+/// The report of `cargo shear --format=json`.
+/// Exit 0 means no finding, exit 1 some.
+/// Any other code, or no report, fails.
+/// Read as clean, it would hide unused dependencies.
+fn read_report(
+    code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<ShearReport, ShearFailure> {
+    let excerpt = || -> String {
+        let text = [stdout, stderr].map(|bytes| String::from_utf8_lossy(bytes).trim().to_owned());
+        text.join("\n")
+            .trim()
+            .chars()
+            .take(OUTPUT_EXCERPT_CHARS)
+            .collect()
+    };
+    if !matches!(code, Some(0 | 1)) {
+        return Err(ShearFailure::Exit {
+            code,
+            output: excerpt(),
+        });
     }
-    serde_json::from_slice::<ShearReport>(stdout).map_err(|cause| {
-        unusable(
-            workspace,
-            "emitted a report comply cannot read",
-            &format!("{cause}\n{}", first_lines(stdout)),
-        )
+    serde_json::from_slice(stdout).map_err(|source| ShearFailure::Unreadable {
+        source,
+        output: excerpt(),
     })
-}
-
-/// A `cargo shear` run comply cannot trust, with the tool's own words.
-fn unusable(workspace: &Path, what_failed: &str, detail: &str) -> anyhow::Error {
-    crate::toolchain::ToolchainError::Unusable {
-        what: format!(
-            "cargo shear {what_failed} in {}; no dependency was examined. \
-             Repair the workspace, then re-run comply.\n{detail}",
-            workspace.display()
-        ),
-    }
-    .into()
-}
-
-/// The opening lines of a tool's output, bounded for a refusal message.
-fn first_lines(raw: &[u8]) -> String {
-    String::from_utf8_lossy(raw)
-        .lines()
-        .take(QUOTED_LINES)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned()
 }
 
 /// Check whether the dep named in a shear message is declared as
@@ -506,9 +511,10 @@ fn byte_offset_to_line_col(path: &Path, offset_bytes: usize) -> Option<(usize, u
 }
 
 /// External wire format mirror — see comply:rust-serde-deny-unknown-fields.
+/// A report without `findings` is unreadable, not clean.
+// unknown-fields-allowed: cargo-shear's JSON report, which also carries `summary`
 #[derive(Debug, Deserialize)]
 struct ShearReport {
-    #[serde(default)]
     findings: Vec<Finding>,
 }
 
@@ -646,18 +652,17 @@ mod tests {
     /// unreadable manifest read as "no unused dependency".
     #[test]
     fn a_shear_run_that_reported_nothing_is_refused() {
-        let ws = Path::new("/ws");
         let clean = br#"{"summary":{"errors":0,"warnings":0,"fixed":0},"findings":[]}"#;
         assert!(
-            read_report(clean, b"", ws).is_ok(),
+            read_report(Some(0), clean, b"").is_ok(),
             "a clean report stays a clean report"
         );
         assert!(
-            read_report(b"", b"error: failed to parse manifest", ws).is_err(),
+            read_report(Some(0), b"", b"error: failed to parse manifest").is_err(),
             "empty stdout is a run that examined no dependency"
         );
         assert!(
-            read_report(b"<html>502</html>", b"", ws).is_err(),
+            read_report(Some(0), b"<html>502</html>", b"").is_err(),
             "output comply cannot read is a run it cannot trust"
         );
     }
@@ -840,6 +845,58 @@ mod tests {
         assert!(!cargo_kept(&metadata, &package, &app, "used", "used"));
         metadata.packages[0].rust_version = Some("1.79".to_owned());
         assert!(cargo_kept(&metadata, &package, &app, "used", "used"));
+    }
+
+    #[test]
+    fn reads_the_report_of_exit_codes_0_and_1() {
+        let clean = br#"{"findings":[]}"#;
+        let found = br#"{"findings":[{"code":"shear/unused_dependency","message":"unused dependency `ok`"}]}"#;
+        assert!(
+            read_report(Some(0), clean, b"")
+                .unwrap()
+                .findings
+                .is_empty()
+        );
+        assert_eq!(read_report(Some(1), found, b"").unwrap().findings.len(), 1);
+    }
+
+    #[test]
+    fn refuses_a_metadata_error_with_exit_code_2() {
+        // Measured with cargo-shear 1.14, on a missing path dependency.
+        let stdout = b"error: Metadata error: `cargo metadata` exited with an error: \n";
+        let stderr = b"error: no matching package named `nope` found\n";
+        let detail = read_report(Some(2), stdout, stderr)
+            .unwrap_err()
+            .to_string();
+        assert!(detail.starts_with("It exited with 2:"), "{detail}");
+        assert!(detail.contains("Metadata error"), "{detail}");
+        assert!(
+            detail.contains("no matching package named `nope`"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn refuses_an_empty_or_unreadable_report() {
+        for stdout in [
+            &b""[..],
+            b"warning: x\n{\"findings\":[]}",
+            br#"{"summary":{}}"#,
+        ] {
+            let detail = read_report(Some(0), stdout, b"").unwrap_err().to_string();
+            assert!(detail.starts_with("Its report is unreadable"), "{detail}");
+        }
+        assert!(read_report(None, br#"{"findings":[]}"#, b"").is_err());
+    }
+
+    #[test]
+    fn bounds_the_quoted_output() {
+        let stderr = "e".repeat(OUTPUT_EXCERPT_CHARS.saturating_mul(2));
+        let detail = read_report(Some(101), b"", stderr.as_bytes())
+            .unwrap_err()
+            .to_string();
+        let header = "It exited with 101:\n".len();
+        assert_eq!(detail.len(), header.saturating_add(OUTPUT_EXCERPT_CHARS));
     }
 
     #[test]

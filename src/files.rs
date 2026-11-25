@@ -507,6 +507,12 @@ pub(crate) fn is_lintable(path: &Path) -> bool {
     classify(path).is_some()
 }
 
+/// The language comply reads the file at `path` in.
+/// `None` for a file comply skips.
+pub(crate) fn language_of(path: &Path) -> Option<Language> {
+    classify(path).map(|file| file.language)
+}
+
 /// Returns None for unsupported extensions (silently skipped).
 fn classify(path: &Path) -> Option<SourceFile> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");

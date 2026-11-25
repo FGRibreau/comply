@@ -75,8 +75,8 @@ pub fn is_available() -> bool {
 ///   - add `-W clippy::xxx` for any lint flagged `enabled = true`
 ///     in `[rules."clippy::xxx"]` (most clippy lints default to
 ///     `allow`, so this is how the user opts in to extra ones)
-///   - materialize a `clippy.toml` from per-lint thresholds and
-///     `[clippy]`, and point cargo at it via `CLIPPY_CONF_DIR`, so something like
+///   - materialize a `clippy.toml` from per-lint thresholds and `[clippy]`
+///     (or the project's own clippy.toml), and point cargo at it via `CLIPPY_CONF_DIR`, so something like
 ///     `[rules."clippy::too_many_lines"] threshold = 50` actually
 ///     reaches clippy
 #[must_use = "diagnostics from clippy must be reported"]
@@ -96,55 +96,51 @@ pub fn lint_files(
     let bindings = crate::rules::collect_clippy_bindings();
     let remap = remap::build_table(&bindings);
     let lint_args = lint_args(&bindings, config);
-    let clippy_conf_dir = config_writer::materialize(config)?;
 
-    let workspaces = group_by_workspace(files);
-    // Every root is checked before any clippy run starts.
-    for root in workspaces.keys().flatten() {
-        config_writer::reject_project_clippy_toml(root)?;
-    }
-    let mut diagnostics = Vec::new();
+    let mut runs = Vec::new();
     let mut skipped = Vec::new();
+    // Every root's clippy.toml is built before any clippy run starts.
+    for (workspace, files_in_ws) in group_by_workspace(files) {
+        let Some(root) = workspace else {
+            skipped.extend(files_in_ws.iter().map(|f| f.path.display().to_string()));
+            continue;
+        };
+        let clippy_conf = config_writer::materialize(config, &root, &files_in_ws)?;
+        runs.push((root, files_in_ws, clippy_conf));
+    }
 
-    for (workspace, files_in_ws) in workspaces {
-        match workspace {
-            Some(root) => {
-                let file_filter: FxHashSet<PathBuf> = files_in_ws
-                    .iter()
-                    .map(|f| canonicalize_or_self(&f.path))
-                    .collect();
-                let packages = if is_partial {
-                    crate::runner_helpers::cargo_package_args(&root, &files_in_ws)
-                } else {
-                    vec!["--workspace".to_owned()]
-                };
-                let source = sqlx::Source::first(&root);
-                let run =
-                    |source| invoke_clippy(&root, &packages, &lint_args, &clippy_conf_dir, source);
-                let output = run(source)?;
-                let output = match sqlx::cache_miss(&root, source, &output.stdout)? {
-                    None => output,
-                    Some(miss) => {
-                        let online = run(sqlx::Source::Database)?;
-                        ensure_analyzed(&root, &online).map_err(|refusal| miss.explain(refusal))?;
-                        online
-                    }
-                };
-                ensure_analyzed(&root, &output)?;
-                usage.record(&output.stdout, &output.stderr, &root);
-                diagnostics.extend(parse_clippy_jsonl(
-                    &output.stdout,
-                    &root,
-                    &file_filter,
-                    &remap,
-                ));
+    let mut diagnostics = Vec::new();
+    for (root, files_in_ws, clippy_conf) in runs {
+        let file_filter: FxHashSet<PathBuf> = files_in_ws
+            .iter()
+            .map(|f| canonicalize_or_self(&f.path))
+            .collect();
+        let packages = if is_partial {
+            crate::runner_helpers::cargo_package_args(&root, &files_in_ws)
+        } else {
+            vec!["--workspace".to_owned()]
+        };
+        let source = sqlx::Source::first(&root);
+        let run = |source| invoke_clippy(&root, &packages, &lint_args, &clippy_conf.dir, source);
+        let output = run(source)?;
+        // A rejected `clippy.toml` fails the same way online.
+        ensure_config_accepted(&clippy_conf, &output.stdout)?;
+        let output = match sqlx::cache_miss(&root, source, &output.stdout)? {
+            None => output,
+            Some(miss) => {
+                let online = run(sqlx::Source::Database)?;
+                ensure_analyzed(&root, &online).map_err(|refusal| miss.explain(refusal))?;
+                online
             }
-            None => {
-                for f in files_in_ws {
-                    skipped.push(f.path.display().to_string());
-                }
-            }
-        }
+        };
+        ensure_analyzed(&root, &output)?;
+        usage.record(&output.stdout, &output.stderr, &root);
+        diagnostics.extend(parse_clippy_jsonl(
+            &output.stdout,
+            &root,
+            &file_filter,
+            &remap,
+        ));
     }
 
     if !skipped.is_empty() {
@@ -260,6 +256,13 @@ pub(crate) fn group_by_workspace<'a>(
     out
 }
 
+/// Build the `sqlx::query!` macros of `workspace` from its `.sqlx/` cache.
+/// They reach the database at build time; the cache answers them without
+/// one, as in a CI build. A `SQLX_OFFLINE` set by the caller wins.
+pub(crate) fn use_sqlx_query_cache(cmd: &mut Command, workspace: &Path) {
+    sqlx::Source::first(workspace).apply(cmd);
+}
+
 /// Spawn `cargo clippy` for one workspace and return the captured Output.
 /// We pass `--quiet` to suppress cargo's progress noise on stderr, and
 /// `--message-format=json` to get structured diagnostics on stdout.
@@ -268,8 +271,8 @@ pub(crate) fn group_by_workspace<'a>(
 /// and `packages` the selection (`--workspace` or `-p` flags), so a root that
 /// is itself a package still reaches the other members.
 ///
-/// `clippy_conf_dir` holds comply's generated `clippy.toml` (`CLIPPY_CONF_DIR`).
-/// `lint_files` refused any project `clippy.toml` beforehand.
+/// `clippy_conf_dir` holds comply's generated `clippy.toml` (`CLIPPY_CONF_DIR`),
+/// which carries the keys of any project `clippy.toml` it accepted.
 /// `source` says where `sqlx::query!` reads query types.
 fn invoke_clippy(
     workspace: &Path,
@@ -308,8 +311,50 @@ fn invoke_clippy(
 
     // The exit code is not read here: clippy exits non-zero both when lints
     // fired and when the build failed, which tells the two apart only in the
-    // JSON stream. `ensure_analyzed` reads that stream and owns the judgement.
+    // JSON stream. `ensure_config_accepted` and `ensure_analyzed` read it.
     Ok(output)
+}
+
+/// Refuse a run whose generated `clippy.toml` clippy rejected (unknown key,
+/// wrong type, duplicate): clippy then lints nothing. Each error names the
+/// line of the file the key came from, never the generated file in the cache.
+fn ensure_config_accepted(conf: &config_writer::ClippyConf, stdout: &[u8]) -> Result<()> {
+    let generated = canonicalize_or_self(&conf.dir.join("clippy.toml"));
+    let mut rejections: Vec<String> = Vec::new();
+    for diag in compiler_messages(stdout).filter(|diag| diag.level == "error") {
+        let Some(span) = diag.spans.iter().find(|span| {
+            span.is_primary && canonicalize_or_self(Path::new(&span.file_name)) == generated
+        }) else {
+            continue;
+        };
+        let line = span.text.first().map_or("", |line| line.text.trim());
+        let hint: String = diag
+            .children
+            .iter()
+            .flat_map(|child| &child.spans)
+            .filter_map(|span| span.suggested_replacement.as_deref())
+            .map(|key| format!(" (did you mean `{key}`?)"))
+            .collect();
+        let rejection = format!(
+            "{}: {}: `{line}`{hint}",
+            conf.origin_of(span.line_start, span.column_start),
+            diag.message
+        );
+        // Clippy repeats the error for every crate of the workspace.
+        if !rejections.contains(&rejection) {
+            rejections.push(rejection);
+        }
+    }
+    if rejections.is_empty() {
+        return Ok(());
+    }
+    Err(crate::toolchain::ToolchainError::Unusable {
+        what: format!(
+            "clippy rejected its configuration and linted no Rust file:\n{}",
+            rejections.join("\n")
+        ),
+    }
+    .into())
 }
 
 /// How many build errors the refusal quotes.

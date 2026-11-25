@@ -132,6 +132,7 @@ fn detect_entry_points<'a>(
                 || has_js_runtime_shebang(p)
                 || is_typeorm_glob_loaded_file(p)
                 || is_gecko_dynamic_loaded_file(p, &gecko_loaded_module_names)
+                || project.react_router_app(p).is_some_and(|app| app.loads(p))
                 || project.entrypoints_contains(p)
                 // The allocation-free fast path for a target that names an
                 // existing file outright; `is_declared_entry_source` reaches the
