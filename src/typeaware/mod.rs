@@ -26,7 +26,7 @@
 //! absent, none of `typescript` >= 7, `@typescript/native` or
 //! `@typescript/native-preview` resolvable anywhere, the checker API failing to
 //! initialize, the program snapshot failing, no `tsconfig.json` to build a
-//! program from, a sidecar that hangs past its ceiling: each ends the run
+//! program from, a file no program holds, a sidecar that hangs past its ceiling: each ends the run
 //! non-zero with the remedy comply knows, never on a stderr notice the caller
 //! can mistake for a result.
 
@@ -88,7 +88,16 @@ struct SidecarResponse {
     diagnostics: Vec<SidecarDiag>,
     #[serde(default)]
     error: Option<String>,
+    /// The files no program held, when `error` is [`UNPLACED`].
+    #[serde(default)]
+    files: Vec<String>,
 }
+
+/// The sidecar `error` for files it placed in no program.
+const UNPLACED: &str = "unplaced";
+
+/// How many such files a refusal names.
+const QUOTED_UNPLACED: usize = 20;
 
 #[derive(Deserialize)]
 struct SidecarDiag {
@@ -131,12 +140,16 @@ pub fn lint_files(files: &[&SourceFile], config: &Config) -> Result<Vec<Diagnost
     // TypeScript without one is a refusal.
     let mut programs: std::collections::BTreeMap<PathBuf, Vec<&SourceFile>> =
         std::collections::BTreeMap::new();
+    let mut orphans = Vec::new();
     for file in files {
         match find_tsconfig(file) {
             Some(tsconfig) => programs.entry(tsconfig).or_default().push(file),
             None if crate::files::is_javascript_source(&file.path) => {}
-            None => return Err(no_tsconfig(&enabled).into()),
+            None => orphans.push(file.path.display().to_string()),
         }
+    }
+    if !orphans.is_empty() {
+        return Err(no_tsconfig(&enabled, &orphans).into());
     }
 
     let mut diagnostics = Vec::new();
@@ -210,8 +223,10 @@ fn lint_program(
         }
     }
 
-    if let Some(err) = response.error.as_deref() {
-        return Err(sidecar_error(err).into());
+    match response.error.as_deref() {
+        Some(UNPLACED) => return Err(unplaced_error(&response.files, &canon_to_orig).into()),
+        Some(err) => return Err(sidecar_error(err).into()),
+        None => {}
     }
 
     Ok(map_diagnostics(
@@ -230,7 +245,10 @@ const QUOTED_RULES: usize = 5;
 /// which needs a `tsconfig.json`. Skipping them on a stderr notice left the run
 /// reporting "all clear" for code they never saw. The project decides instead:
 /// add a `tsconfig.json`, or disable those rules in its `comply.toml`.
-fn no_tsconfig(enabled: &[&'static crate::rules::meta::RuleMeta]) -> ToolchainError {
+fn no_tsconfig(
+    enabled: &[&'static crate::rules::meta::RuleMeta],
+    orphans: &[String],
+) -> ToolchainError {
     let named: Vec<&str> = enabled.iter().take(QUOTED_RULES).map(|m| m.id).collect();
     let hidden = enabled.len().saturating_sub(named.len());
     let rest = if hidden > 0 {
@@ -240,9 +258,10 @@ fn no_tsconfig(enabled: &[&'static crate::rules::meta::RuleMeta]) -> ToolchainEr
     };
     ToolchainError::Unusable {
         what: format!(
-            "type-aware analysis found no tsconfig.json above the linted files, so the {} \
+            "type-aware analysis found no tsconfig.json above {}, so the {} \
              rule(s) that need a resolved TypeScript program did not run ({}{rest}) — add a \
              tsconfig.json, or disable those rules in comply.toml",
+            quoted_files(orphans.to_vec()),
             enabled.len(),
             named.join(", ")
         ),
@@ -476,6 +495,43 @@ fn package_not_found(roots: &[PathBuf]) -> ToolchainError {
     }
 }
 
+/// The refusal for `files`, which no TypeScript program holds.
+/// Each is named by the path comply discovered.
+fn unplaced_error(
+    files: &[String],
+    canon_to_orig: &rustc_hash::FxHashMap<String, PathBuf>,
+) -> ToolchainError {
+    let paths: Vec<String> = files
+        .iter()
+        .map(|file| {
+            canon_to_orig
+                .get(file)
+                .map_or_else(|| file.clone(), |path| path.display().to_string())
+        })
+        .collect();
+    ToolchainError::Unusable {
+        what: format!(
+            "type-aware analysis found no TypeScript program for {}: no tsconfig.json \
+             includes it, directly or through `references`, and none sits above it — add it \
+             to a tsconfig.json",
+            quoted_files(paths)
+        ),
+    }
+}
+
+/// `paths`, sorted, the first [`QUOTED_UNPLACED`] named.
+fn quoted_files(mut paths: Vec<String>) -> String {
+    paths.sort();
+    let more = paths.len().saturating_sub(QUOTED_UNPLACED);
+    paths.truncate(QUOTED_UNPLACED);
+    let tail = if more > 0 {
+        format!(" and {more} more")
+    } else {
+        String::new()
+    };
+    format!("{}{tail}", paths.join(", "))
+}
+
 /// Map sidecar diagnostics into comply diagnostics at the rule's severity,
 /// ignoring any unknown rule id.
 fn map_diagnostics(
@@ -586,6 +642,30 @@ mod tests {
         }];
         let out = map_diagnostics(diags, &[m], &canon);
         assert_eq!(out[0].path.to_string_lossy(), "/abs/unmapped.ts");
+    }
+
+    // An unplaced file is refused under its discovered path.
+    #[test]
+    fn unplaced_files_are_refused_by_their_discovered_path() {
+        let mut canon = rustc_hash::FxHashMap::default();
+        canon.insert(
+            "/private/tmp/p/y.ts".to_string(),
+            PathBuf::from("/tmp/p/y.ts"),
+        );
+        let err = unplaced_error(&["/private/tmp/p/y.ts".to_string()], &canon);
+        assert!(matches!(err, ToolchainError::Unusable { .. }), "{err:?}");
+        assert!(err.to_string().contains("for /tmp/p/y.ts:"), "{err}");
+    }
+
+    // The refusal names at most `QUOTED_UNPLACED` files.
+    #[test]
+    fn an_unplaced_refusal_counts_the_files_it_does_not_name() {
+        let files: Vec<String> = (0..=QUOTED_UNPLACED)
+            .map(|n| format!("/p/{n:02}.ts"))
+            .collect();
+        let msg = unplaced_error(&files, &rustc_hash::FxHashMap::default()).to_string();
+        assert!(msg.contains("/p/19.ts and 1 more:"), "{msg}");
+        assert!(!msg.contains("/p/20.ts"), "{msg}");
     }
 
     // ── fail-loud sidecar errors (#5941, #8109) ─────────────────────────────
