@@ -5,19 +5,11 @@
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::project::LocaleIndex;
+use crate::project::locale_index::is_in_locale_dir;
 use crate::rules::backend::{CheckCtx, TextCheck};
 
 #[derive(Debug)]
 pub struct Check;
-
-fn is_locale_dir(path: &std::path::Path) -> bool {
-    let path_str = path.to_string_lossy();
-    path_str.contains("/locales/")
-        || path_str.contains("/translations/")
-        || path_str.contains("/i18n/")
-        || path_str.contains("/lang/")
-        || path_str.contains("/messages/")
-}
 
 fn is_locale_filename(path: &std::path::Path) -> bool {
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -41,7 +33,7 @@ impl TextCheck for Check {
         }
 
         // Only check locale files
-        if !is_locale_dir(ctx.path) && !is_locale_filename(ctx.path) {
+        if !is_in_locale_dir(ctx.path) && !is_locale_filename(ctx.path) {
             return vec![];
         }
 

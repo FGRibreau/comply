@@ -6,45 +6,12 @@
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::icu;
+use crate::project::locale_index::is_locale_file;
 use crate::rules::backend::{CheckCtx, TextCheck};
 use serde_json::Value;
 
 #[derive(Debug)]
 pub struct Check;
-
-fn is_i18n_file(path: &std::path::Path) -> bool {
-    let path_str = path.to_string_lossy();
-
-    // Check directory patterns
-    if path_str.contains("/locales/")
-        || path_str.contains("/translations/")
-        || path_str.contains("/i18n/")
-        || path_str.contains("/lang/")
-        || path_str.contains("/messages/")
-    {
-        return true;
-    }
-
-    // Check filename patterns (en.json, fr-FR.json, zh_CN.json)
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        // 2-letter language code
-        if stem.len() == 2 && stem.chars().all(|c| c.is_ascii_lowercase()) {
-            return true;
-        }
-        // Language with region: en-US, fr-FR, zh_CN
-        if (stem.len() == 5 || stem.len() == 6) && (stem.contains('-') || stem.contains('_')) {
-            let parts: Vec<&str> = stem.split(['-', '_']).collect();
-            if parts.len() == 2
-                && parts[0].len() == 2
-                && parts[0].chars().all(|c| c.is_ascii_lowercase())
-            {
-                return true;
-            }
-        }
-    }
-
-    false
-}
 
 fn validate_json_strings(
     value: &Value,
@@ -97,13 +64,8 @@ fn find_line_for_key(source: &str, key: &str) -> usize {
 
 impl TextCheck for Check {
     fn check(&self, ctx: &CheckCtx) -> Vec<Diagnostic> {
-        // Only check JSON files
-        if ctx.path.extension().and_then(|e| e.to_str()) != Some("json") {
-            return vec![];
-        }
-
-        // Only check i18n files
-        if !is_i18n_file(ctx.path) {
+        // Only check i18n JSON files
+        if !is_locale_file(ctx.path) {
             return vec![];
         }
 

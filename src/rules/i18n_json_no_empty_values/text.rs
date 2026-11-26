@@ -1,6 +1,7 @@
 //! Detects empty string values in i18n JSON files.
 
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::project::locale_index::is_in_locale_dir;
 use crate::rules::backend::{CheckCtx, TextCheck};
 use serde_json::Value;
 use std::path::Path;
@@ -12,13 +13,7 @@ fn is_locale_file(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) != Some("json") {
         return false;
     }
-    let path_str = path.to_string_lossy();
-    if path_str.contains("/locales/")
-        || path_str.contains("/translations/")
-        || path_str.contains("/i18n/")
-        || path_str.contains("/lang/")
-        || path_str.contains("/messages/")
-    {
+    if is_in_locale_dir(path) {
         return true;
     }
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {

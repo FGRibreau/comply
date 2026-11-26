@@ -206,20 +206,29 @@ impl LocaleIndex {
     }
 }
 
-fn is_locale_file(path: &Path) -> bool {
+/// Directories that hold translation files.
+const LOCALE_DIRS: &[&str] = &[
+    "/locales/",
+    "/translations/",
+    "/i18n/",
+    "/lang/",
+    "/messages/",
+];
+
+/// True when `path` sits under a translation directory.
+pub(crate) fn is_in_locale_dir(path: &Path) -> bool {
+    let path_str = crate::rules::path_utils::path_for_matching(path);
+    LOCALE_DIRS.iter().any(|dir| path_str.contains(dir))
+}
+
+/// True when `path` is a JSON translation file.
+/// Found by its directory or its locale name (`fr-FR.json`).
+pub(crate) fn is_locale_file(path: &Path) -> bool {
     if path.extension().and_then(|e| e.to_str()) != Some("json") {
         return false;
     }
 
-    let path_str = path.to_string_lossy();
-
-    // Check directory patterns
-    if path_str.contains("/locales/")
-        || path_str.contains("/translations/")
-        || path_str.contains("/i18n/")
-        || path_str.contains("/lang/")
-        || path_str.contains("/messages/")
-    {
+    if is_in_locale_dir(path) {
         return true;
     }
 
@@ -395,5 +404,19 @@ mod tests {
             index.get_base_locale(Path::new("/app/locales/fr.json")),
             Some("de")
         );
+    }
+
+    // `--staged` lists a root `locales/` file without `./`.
+    #[test]
+    fn root_locales_dir_holds_locale_files() {
+        assert!(is_in_locale_dir(Path::new("locales/common.json")));
+        assert!(is_locale_file(Path::new("locales/common.json")));
+    }
+
+    // A partial `locales` match is not a locale directory.
+    #[test]
+    fn dir_near_a_locales_substring_holds_no_locale_file() {
+        assert!(!is_in_locale_dir(Path::new("mylocales/common.json")));
+        assert!(!is_locale_file(Path::new("mylocales/common.json")));
     }
 }

@@ -1,6 +1,7 @@
 //! Detects translation values identical to the base locale (likely untranslated).
 
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::project::locale_index::is_in_locale_dir;
 use crate::rules::backend::{CheckCtx, TextCheck};
 use serde_json::Value;
 use rustc_hash::FxHashMap;
@@ -8,15 +9,6 @@ use std::path::Path;
 
 #[derive(Debug)]
 pub struct Check;
-
-fn is_locale_dir(path: &Path) -> bool {
-    let path_str = path.to_string_lossy();
-    path_str.contains("/locales/")
-        || path_str.contains("/translations/")
-        || path_str.contains("/i18n/")
-        || path_str.contains("/lang/")
-        || path_str.contains("/messages/")
-}
 
 fn is_locale_filename(path: &Path) -> bool {
     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -128,7 +120,7 @@ impl TextCheck for Check {
             return vec![];
         }
 
-        if !is_locale_dir(ctx.path) && !is_locale_filename(ctx.path) {
+        if !is_in_locale_dir(ctx.path) && !is_locale_filename(ctx.path) {
             return vec![];
         }
 
