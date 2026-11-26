@@ -1138,6 +1138,33 @@ mod tests {
         assert_eq!(d.len(), 1, "{d:?}");
     }
 
+    const UNGUARDED_NEW_URL: &str = "function f(u) { return new URL(u); }";
+
+    // `--staged` lists paths relative to the repository root.
+    // So a root `test/` file has no leading slash.
+    #[test]
+    fn allows_untrusted_new_url_in_root_test_dir() {
+        let d = run_at(UNGUARDED_NEW_URL, "test/x.cjs");
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    #[test]
+    fn allows_untrusted_new_url_in_other_root_test_dirs() {
+        for path in ["tests/x.cjs", "vitest/x.cjs", "e2e/x.cjs"] {
+            let d = run_at(UNGUARDED_NEW_URL, path);
+            assert!(d.is_empty(), "{path}: {d:?}");
+        }
+    }
+
+    // A partial `test` match stays production code.
+    #[test]
+    fn still_flags_untrusted_new_url_near_a_test_substring() {
+        for path in ["src/test-utils.cjs", "contest/x.cjs"] {
+            let d = run_at(UNGUARDED_NEW_URL, path);
+            assert_eq!(d.len(), 1, "{path}: {d:?}");
+        }
+    }
+
     // Regression for #6582: a parameter typed `: URL` already holds a valid URL
     // object; `new URL(urlObject)` stringifies its `.href` and cannot throw.
     #[test]

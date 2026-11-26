@@ -822,10 +822,7 @@ pub fn is_extraneous_test_file(path: &Path) -> bool {
         || path_str.contains(".test.")
         || path_str.contains(".spec.")
         || path_str.contains(".setup.")
-        || path_str.contains("/test/")
-        || path_str.contains("/tests/")
-        || path_str.contains("/vitest/")
-        || path_str.contains("/e2e/");
+        || has_path_segment(path, &["test", "tests", "vitest", "e2e"]);
     is_marked
         || has_test_file_stem(path)
         || has_test_setup_file_stem(path)
