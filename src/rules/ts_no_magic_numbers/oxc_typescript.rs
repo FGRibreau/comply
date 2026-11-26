@@ -81,7 +81,7 @@ impl OxcCheck for Check {
         if ctx.file.in_benchmark_dir() {
             return;
         }
-        if ctx.path.to_string_lossy().contains("/examples/") {
+        if crate::rules::path_utils::path_for_matching(ctx.path).contains("/examples/") {
             return;
         }
 
@@ -2686,5 +2686,21 @@ mod tests {
         // numeric literal in a runtime comparison or call argument still flags.
         assert_eq!(run("function f(n: number) { if (n === 86400) return; }").len(), 1);
         assert_eq!(run("function f() { return foo(86400); }").len(), 1);
+    }
+
+    const RUNTIME_MAGIC: &str = "function f() { return foo(86400); }";
+
+    // `--staged` lists a root `examples/` file without `./`.
+    #[test]
+    fn skips_a_root_examples_dir() {
+        let d = crate::rules::test_helpers::run_rule(&Check, RUNTIME_MAGIC, "examples/demo.ts");
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    // A partial `examples` match stays production code.
+    #[test]
+    fn still_flags_a_dir_near_an_examples_substring() {
+        let d = crate::rules::test_helpers::run_rule(&Check, RUNTIME_MAGIC, "myexamples/demo.ts");
+        assert_eq!(d.len(), 1, "{d:?}");
     }
 }

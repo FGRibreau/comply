@@ -18,7 +18,7 @@ use crate::rules::meta::RuleMeta;
 /// `drizzle.staging-config.ts`, and `drizzle-config.ts`, while a runtime helper
 /// like `useDrizzleConfig.ts` (no `-`/`.` separator before `config`) is not.
 pub(crate) fn is_config_or_migration_file(path: &std::path::Path) -> bool {
-    let s = path.to_string_lossy();
+    let s = crate::rules::path_utils::path_for_matching(path);
     if s.contains("/migrate")
         || s.contains("/migrations/")
         || s.ends_with("migrate.ts")
@@ -54,5 +54,22 @@ pub fn register() -> RuleDef {
             (Language::JavaScript, Backend::Oxc(Box::new(oxc_typescript::Check))),
             (Language::Tsx, Backend::Oxc(Box::new(oxc_typescript::Check))),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `--staged` lists a root `migrations/` file without `./`.
+    #[test]
+    fn root_migrations_dir_is_migration_tooling() {
+        assert!(is_config_or_migration_file(std::path::Path::new("migrations/001.ts")));
+    }
+
+    // A partial `migrations` match stays runtime code.
+    #[test]
+    fn dir_near_a_migrations_substring_is_runtime_code() {
+        assert!(!is_config_or_migration_file(std::path::Path::new("src/premigrations/001.ts")));
     }
 }

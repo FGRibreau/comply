@@ -12,7 +12,7 @@ fn imports_better_result(source: &str) -> bool {
 }
 
 fn is_helper_path(path: &std::path::Path) -> bool {
-    let s = path.to_string_lossy();
+    let s = crate::rules::path_utils::path_for_matching(path);
     s.contains("/lib/") || s.contains("/utils/") || s.contains("/helpers/")
 }
 
@@ -376,5 +376,17 @@ export async function loadUser(id: string): Promise<User | null> {
 }
 "#;
         assert_eq!(crate::rules::test_helpers::run_rule(&Check, src, "t.ts").len(), 1);
+    }
+
+    // `--staged` lists a root `lib/` file without `./`.
+    #[test]
+    fn root_lib_dir_is_a_helper_path() {
+        assert!(is_helper_path(std::path::Path::new("lib/find.ts")));
+    }
+
+    // A partial `lib` match stays a handler path.
+    #[test]
+    fn dir_near_a_lib_substring_is_not_a_helper_path() {
+        assert!(!is_helper_path(std::path::Path::new("mylib/find.ts")));
     }
 }

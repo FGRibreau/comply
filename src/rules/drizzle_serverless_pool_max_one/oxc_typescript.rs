@@ -10,7 +10,7 @@ use std::sync::Arc;
 pub struct Check;
 
 fn is_serverless(path: &std::path::Path, source: &str) -> bool {
-    let p = path.to_string_lossy();
+    let p = crate::rules::path_utils::path_for_matching(path);
     let path_hint = p.contains("/api/")
         || p.contains("lambda")
         || p.contains("edge")
@@ -137,5 +137,17 @@ mod tests {
     fn ignores_non_serverless() {
         let src = "const pool = new Pool({ connectionString: 'x' })";
         assert!(run_non_serverless(src).is_empty());
+    }
+
+    // `--staged` lists a root `api/` file without `./`.
+    #[test]
+    fn root_api_dir_is_serverless() {
+        assert!(is_serverless(std::path::Path::new("api/db.ts"), ""));
+    }
+
+    // A partial `api` match is not a serverless hint.
+    #[test]
+    fn dir_near_an_api_substring_is_not_serverless() {
+        assert!(!is_serverless(std::path::Path::new("src/myapi/db.ts"), ""));
     }
 }
