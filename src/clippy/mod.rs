@@ -28,9 +28,9 @@
 //!    keep only `compiler-message` rows, filter to spans inside the
 //!    requested files, and remap each lint code to its comply RuleMeta.
 //!    A run stopped by a denied lint gets two more (see [`Pass`]).
-//! 3. Files outside any workspace (loose `.rs` files passed on the CLI)
-//!    are skipped with a single warning — clippy can't run on them
-//!    without a Cargo manifest.
+//! 3. A file without a Cargo.toml joins a crate whose `mod` reaches it.
+//!    The passes' dep-info then shows whether rustc read each file.
+//!    A file none read is named as not analyzed.
 //!
 //! Performance note: clippy compiles the workspace, so the first run on
 //! a large project takes seconds-to-minutes. Subsequent runs are
@@ -55,6 +55,7 @@ use std::sync::OnceLock;
 use crate::config::Config;
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::files::SourceFile;
+use crate::project::import_index::ImportIndex;
 use crate::rules::meta::RuleMeta;
 use schema::{CargoMessage, RustcDiagnostic, RustcSpan};
 
@@ -71,7 +72,7 @@ pub fn is_available() -> bool {
 }
 
 /// Run clippy on every workspace touched by `files` and return the
-/// remapped diagnostics. Files outside any workspace are skipped.
+/// remapped diagnostics.
 /// The [`ExternUsage`] of every crate clippy compiled comes along.
 ///
 /// `config` is the resolved per-project comply.toml. We use it to:
@@ -87,12 +88,15 @@ pub fn is_available() -> bool {
 /// `is_partial` (a git file scope) limits each run to the packages owning
 /// `files`; a plain path scan lints the whole workspace.
 ///
-/// A crate outside the workspace members, or a loose file, is named.
+/// `index` names the crate whose `mod` reaches a file without a Cargo.toml.
+///
+/// A crate outside the workspace members is named.
 /// So is a file no compiled target reads.
 /// A git file scope refuses it; a path scan notes it.
 pub fn lint_files(
     files: &[&SourceFile],
     config: &Config,
+    index: &ImportIndex,
     is_partial: bool,
 ) -> Result<(Vec<Diagnostic>, ExternUsage)> {
     let mut usage = ExternUsage::default();
@@ -104,31 +108,25 @@ pub fn lint_files(
     let remap = remap::build_table(&bindings);
     let lint_args = lint_args(&bindings, config);
 
+    let mut groups = group_by_workspace(files);
+    // A file without a Cargo.toml joins a crate whose `mod` reaches it.
+    let mut loose = Vec::new();
+    for file in groups.remove(&None).unwrap_or_default() {
+        match declaring_workspace(index, &file.path) {
+            Some(root) => groups.entry(Some(root)).or_default().push(file),
+            None => loose.push(file),
+        }
+    }
     let mut runs = Vec::new();
-    let mut skipped = Vec::new();
     // Every root's clippy.toml is built before any clippy run starts.
-    for (workspace, files_in_ws) in group_by_workspace(files) {
-        let Some(root) = workspace else {
-            skipped.extend(files_in_ws.iter().map(|f| f.path.display().to_string()));
-            continue;
-        };
+    for (root, files_in_ws) in groups.into_iter().filter_map(|(ws, f)| Some((ws?, f))) {
         let clippy_conf = config_writer::materialize(config, &root, &files_in_ws)?;
         runs.push((root, files_in_ws, clippy_conf));
     }
-    let loose = (!skipped.is_empty()).then(|| {
-        format!(
-            "clippy skipped {} loose file(s) — no Cargo.toml in any \
-             ancestor directory: {}",
-            skipped.len(),
-            skipped.join(", ")
-        )
-    });
-    if is_partial && let Some(what) = &loose {
-        let what = what.clone();
-        return Err(crate::toolchain::ToolchainError::Unusable { what }.into());
-    }
 
     let mut diagnostics = Vec::new();
+    let mut compiled = FxHashSet::default();
+    let mut judged = loose;
     for (root, files_in_ws, clippy_conf) in runs {
         let file_filter: FxHashSet<PathBuf> = files_in_ws
             .iter()
@@ -169,7 +167,7 @@ pub fn lint_files(
             Ok(output)
         };
         let mut output = run(Pass::Lint)?;
-        let mut compiled = compiled_sources(&root, &members, &output.stdout)?;
+        compiled.extend(compiled_sources(&root, &members, &output.stdout)?);
         if denied_lints(&output.stdout).next().is_some() {
             run(Pass::Check)?;
             let capped = run(Pass::Capped)?;
@@ -179,25 +177,7 @@ pub fn lint_files(
         }
         ensure_analyzed(&root, &output.stdout)?;
         usage.record(&output.stdout, &output.stderr, &root);
-        let uncompiled: Vec<&SourceFile> = files_in_ws
-            .iter()
-            .copied()
-            .filter(|file| !compiled.contains(&canonicalize_or_self(&file.path)))
-            .collect();
-        if !uncompiled.is_empty() {
-            let why = format!(
-                "no target cargo clippy compiled in {} reads {} Rust file(s); \
-                 a `mod` item brings a file into its crate",
-                root.display(),
-                uncompiled.len()
-            );
-            let unanalyzed = if is_partial {
-                crate::toolchain::Unanalyzed::Refuse
-            } else {
-                crate::toolchain::Unanalyzed::Note
-            };
-            crate::toolchain::report_unanalyzed(&why, &uncompiled, unanalyzed)?;
-        }
+        judged.extend(files_in_ws);
         diagnostics.extend(parse_clippy_jsonl(
             &output.stdout,
             &root,
@@ -206,8 +186,22 @@ pub fn lint_files(
         ));
     }
 
-    if let Some(what) = loose {
-        eprintln!("comply: {what}");
+    // Any pass's dep-info vouches for a file, even across workspaces.
+    let uncompiled: Vec<&SourceFile> = judged
+        .into_iter()
+        .filter(|file| !compiled.contains(&canonicalize_or_self(&file.path)))
+        .collect();
+    if !uncompiled.is_empty() {
+        let unanalyzed = if is_partial {
+            crate::toolchain::Unanalyzed::Refuse
+        } else {
+            crate::toolchain::Unanalyzed::Note
+        };
+        crate::toolchain::report_unanalyzed(
+            &uncompiled_why(uncompiled.len()),
+            &uncompiled,
+            unanalyzed,
+        )?;
     }
 
     Ok((diagnostics, usage))
@@ -222,6 +216,40 @@ const UNUSED_EXTERNS_LINT: &str = "--force-warn=unused_crate_dependencies";
 /// A target reporting it proves rustc's verdicts reach comply.
 /// cargo 1.100 swallows every such report, the probe's included.
 const LIVENESS_PROBE: &str = "comply_liveness_probe";
+
+/// The workspace of a crate whose `mod` items reach `file`.
+/// `#[path]` lets a crate read a file outside every package.
+fn declaring_workspace(index: &ImportIndex, file: &Path) -> Option<PathBuf> {
+    let mut seen = FxHashSet::default();
+    let mut pending = vec![file.to_path_buf()];
+    while let Some(module) = pending.pop() {
+        for declarer in index.rust_mod_declarers(&module) {
+            if let Some(root) = crate::runner_helpers::find_cargo_workspace_root(declarer) {
+                return Some(root);
+            }
+            if seen.insert(declarer.to_path_buf()) {
+                pending.push(declarer.to_path_buf());
+            }
+        }
+    }
+    None
+}
+
+/// Why clippy analyzed none of `count` Rust files, with the remedies.
+fn uncompiled_why(count: usize) -> String {
+    let (host, other) = if cfg!(target_os = "macos") {
+        ("macos", "linux")
+    } else {
+        (std::env::consts::OS, "macos")
+    };
+    format!(
+        "cargo clippy compiled no target that reads {count} Rust file(s). \
+         A file joins a crate only through a `mod` item. \
+         A cfg off on this {host} host leaves it out, as \
+         `#[cfg(target_os = \"{other}\")] pub mod {other};` does. \
+         List a file no build of this host compiles in .complyignore"
+    )
+}
 
 /// The `-W`/`-A` flags passed after `--`, shared by lint and `--fix`:
 /// clippy records them in each crate's fingerprint, so any difference
