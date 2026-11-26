@@ -74,21 +74,23 @@ pub fn find_cargo_workspace_root(path: &Path) -> Option<PathBuf> {
 /// Whether `workspace.exclude` of the `root` manifest covers `crate_dir`.
 /// An excluded ancestor under `root` covers it too.
 /// Runs from `root` with `--package` or `--workspace` miss it.
+/// A `members` entry above it wins, as in cargo.
+/// A glob entry does not.
 fn excludes(content: &str, root: &Path, crate_dir: &Path) -> bool {
     let Ok(manifest) = content.parse::<toml::Table>() else {
         return false;
     };
-    let Some(excluded) = manifest
-        .get("workspace")
-        .and_then(|w| w.get("exclude"))
-        .and_then(toml::Value::as_array)
-    else {
-        return false;
+    let workspace = manifest.get("workspace");
+    let covers = |key: &str| {
+        workspace
+            .and_then(|w| w.get(key))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .any(|entry| crate_dir.starts_with(root.join(entry.trim_end_matches('/'))))
     };
-    excluded
-        .iter()
-        .filter_map(toml::Value::as_str)
-        .any(|entry| crate_dir.starts_with(root.join(entry.trim_end_matches('/'))))
+    covers("exclude") && !covers("members")
 }
 
 /// Cargo's package selection for a clippy run over `files` in `workspace`:
@@ -191,6 +193,27 @@ mod tests {
         assert_eq!(of("tools/excl"), Some(root.join("tools/excl")));
         assert_eq!(of("member"), Some(root.clone()));
         assert_eq!(of("tools/other"), Some(root));
+    }
+
+    // cargo 1.100 builds `a/fixtures/x` in the workspace, `g/b/fixtures/y` alone.
+    #[test]
+    fn a_member_above_an_excluded_crate_keeps_it_in_the_workspace() {
+        let fixture = tempfile::TempDir::new().unwrap();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"g/*\"]\n\
+             exclude = [\"a/fixtures/x\", \"g/b/fixtures/y\"]\n",
+        )
+        .unwrap();
+        for dir in ["a", "a/fixtures/x", "g/b", "g/b/fixtures/y"] {
+            std::fs::create_dir_all(root.join(dir).join("src")).unwrap();
+            std::fs::write(root.join(dir).join("Cargo.toml"), "[package]\n").unwrap();
+            std::fs::write(root.join(dir).join("src/lib.rs"), "").unwrap();
+        }
+        let of = |dir: &str| find_cargo_workspace_root(&root.join(dir).join("src/lib.rs"));
+        assert_eq!(of("a/fixtures/x"), Some(root.clone()));
+        assert_eq!(of("g/b/fixtures/y"), Some(root.join("g/b/fixtures/y")));
     }
 
     #[test]
