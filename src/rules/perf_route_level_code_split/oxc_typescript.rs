@@ -55,7 +55,7 @@ fn is_server_only_module(spec: &str) -> bool {
 }
 
 fn is_test_or_e2e(path: &std::path::Path) -> bool {
-    let s = path.to_string_lossy();
+    let s = crate::rules::path_utils::path_for_matching(path);
     s.contains("/e2e/")
         || s.contains("__tests__")
         || s.contains(".test.")
@@ -256,5 +256,25 @@ mod tests {
     fn skips_e2e_files() {
         let d = crate::rules::test_helpers::run_rule(&Check, "import LoginPage from './pages/login.page';", "project/e2e/fixtures.ts");
         assert!(d.is_empty());
+    }
+
+    const ROUTE_IMPORT: &str = "import Home from '../src/pages/Home';";
+
+    // `--staged` lists root test files without a leading `./`.
+    #[test]
+    fn skips_root_test_dirs() {
+        for path in ["test/app.tsx", "tests/app.tsx", "e2e/app.tsx"] {
+            let d = crate::rules::test_helpers::run_rule(&Check, ROUTE_IMPORT, path);
+            assert!(d.is_empty(), "{path}: {d:?}");
+        }
+    }
+
+    // A partial `test` match stays production code.
+    #[test]
+    fn still_flags_route_import_near_a_test_substring() {
+        for path in ["contest/app.tsx", "src/test-utils.tsx"] {
+            let d = crate::rules::test_helpers::run_rule(&Check, ROUTE_IMPORT, path);
+            assert_eq!(d.len(), 1, "{path}: {d:?}");
+        }
     }
 }

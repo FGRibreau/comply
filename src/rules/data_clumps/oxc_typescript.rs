@@ -36,7 +36,7 @@ fn is_framework_middleware_subset(subset: &[String]) -> bool {
 }
 
 fn is_test_path(path: &std::path::Path) -> bool {
-    let lower = path.to_string_lossy().replace('\\', "/");
+    let lower = crate::rules::path_utils::path_for_matching(path);
     lower.contains("/tests/")
         || lower.contains("/test/")
         || lower.contains("/fixtures/")
@@ -834,5 +834,25 @@ function send(host: string, port: number, proto: string, retries: number) { retu
 function connect(host: string, port: number, proto: string, timeout: number) { return port; }
 "#;
         assert_eq!(run(src).len(), 2);
+    }
+
+    const CLUMP: &str = "function a(alpha, beta, gamma) {}\nfunction b(alpha, beta, gamma) {}\n";
+
+    // `--staged` lists root test files without a leading `./`.
+    #[test]
+    fn skips_root_test_and_fixture_dirs() {
+        for path in ["test/c.js", "tests/c.js", "fixtures/c.js"] {
+            let d = crate::rules::test_helpers::run_rule(&Check, CLUMP, path);
+            assert!(d.is_empty(), "{path}: {d:?}");
+        }
+    }
+
+    // A partial directory match stays production code.
+    #[test]
+    fn still_flags_clumps_near_a_test_dir_substring() {
+        for path in ["contest/c.js", "myfixtures/c.js"] {
+            let d = crate::rules::test_helpers::run_rule(&Check, CLUMP, path);
+            assert_eq!(d.len(), 2, "{path}: {d:?}");
+        }
     }
 }

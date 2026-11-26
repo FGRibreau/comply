@@ -728,9 +728,11 @@ pub(crate) fn scan_path(path: &Path) -> PathSegments {
             || lower.contains("/__tests__/")
             || lower.starts_with("__tests__/")
             || lower.contains("/fixtures/")
+            || lower.starts_with("fixtures/")
             || has_integration_fixture_app_shape(&lower)
             || is_top_level_integration_dir(&lower)
             || lower.contains("/__mocks__/")
+            || lower.starts_with("__mocks__/")
             || lower.contains("/mocks/")
             || lower.starts_with("mocks/")
             || lower.contains("/e2e/")
@@ -948,6 +950,20 @@ mod tests {
         let seg = scan_path(&PathBuf::from("/proj/app/page.tsx"));
         assert!(seg.in_app_router);
         assert!(!seg.in_pages_router);
+    }
+
+    // `--staged` lists root directories without a leading `./`.
+    #[test]
+    fn path_root_fixture_and_mock_dirs_are_test_dirs() {
+        assert!(scan_path(&PathBuf::from("fixtures/data.ts")).in_test_dir);
+        assert!(scan_path(&PathBuf::from("__mocks__/fs.ts")).in_test_dir);
+    }
+
+    // A partial `fixtures` match stays production code.
+    #[test]
+    fn path_near_a_fixture_dir_substring_is_not_a_test_dir() {
+        assert!(!scan_path(&PathBuf::from("myfixtures/data.ts")).in_test_dir);
+        assert!(!scan_path(&PathBuf::from("src/__mocks__x/fs.ts")).in_test_dir);
     }
 
     #[test]
