@@ -3657,6 +3657,30 @@ export {};
         );
     }
 
+    fn nextjs_diags_at(path: &str) -> Vec<crate::diagnostic::Diagnostic> {
+        crate::rules::test_helpers::run_rule_with_ctx(
+            &Check,
+            "initZodLocale();\nexport {};\n",
+            path,
+            &crate::project::ProjectCtx::for_test_with_framework("nextjs"),
+            crate::rules::file_ctx::default_static_file_ctx(),
+        )
+    }
+
+    // `--staged` lists a root `app/` entry without a leading `./`.
+    #[test]
+    fn allows_a_root_app_router_entry() {
+        let diags = nextjs_diags_at("app/page.tsx");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    // A partial `app` match stays an ordinary module.
+    #[test]
+    fn still_flags_a_module_near_an_app_substring() {
+        let diags = nextjs_diags_at("webapp/page.tsx");
+        assert_eq!(diags.len(), 1, "{diags:?}");
+    }
+
     // Regression for #6026 follow-up: `ssr.tsx` is one of the TanStack bootstrap
     // basenames suppressed from the broad framework-entry exemption, so it must
     // be re-exempted by the depth-aware `is_tanstack_start_entry` at the

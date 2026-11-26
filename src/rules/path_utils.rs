@@ -228,6 +228,13 @@ fn has_path_segment(path: &Path, names: &[&str]) -> bool {
     })
 }
 
+/// `path` with `/` separators and a leading `/`.
+/// So `contains("/dir/")` also matches the first segment.
+/// `--staged` and `comply <dir>` list paths without `./`.
+pub fn path_for_matching(path: &Path) -> String {
+    format!("/{}", path.to_string_lossy().replace('\\', "/"))
+}
+
 /// Directory names where dev-only tooling lives and rules that exempt
 /// "not shipped in the published package" code (e.g. `no-extraneous-import`)
 /// are relaxed. The broad set: build/CI scripts, demonstration code,
@@ -1436,7 +1443,7 @@ pub fn is_framework_specific_entry_point(path: &Path, project: &ProjectCtx) -> b
 /// `/app/`, Remix `routes/`) is recognized even when the framework dependency
 /// lives only in a nested sub-package, invisible to root-anchored detection.
 pub fn is_in_framework_entry_dir(path: &Path, project: &ProjectCtx) -> bool {
-    let path_str = path.to_string_lossy().replace('\\', "/");
+    let path_str = path_for_matching(path);
     if project
         .framework_entry_dirs()
         .any(|dir| path_str.contains(dir))
@@ -1726,7 +1733,7 @@ pub fn is_framework_entry_point(path: &Path, project: &ProjectCtx) -> bool {
         return true;
     }
 
-    let path_str = path.to_string_lossy().replace('\\', "/");
+    let path_str = path_for_matching(path);
     if project
         .framework_entry_dirs()
         .any(|dir| path_str.contains(dir))
@@ -3061,5 +3068,38 @@ mod aux_path_tests {
         }
         assert!(!is_typescript_language_file(&PathBuf::from("a.vue")));
         assert!(!is_typescript_language_file(&PathBuf::from("noext")));
+    }
+
+    // `--staged` lists root entry dirs without a leading `./`.
+    #[test]
+    fn framework_entry_dirs_match_at_the_path_root() {
+        let nextjs = ProjectCtx::for_test_with_framework("nextjs");
+        assert!(is_framework_entry_point(
+            &PathBuf::from("app/page.tsx"),
+            &nextjs
+        ));
+        assert!(is_in_framework_entry_dir(
+            &PathBuf::from("pages/index.tsx"),
+            &nextjs
+        ));
+        let shadcn = ProjectCtx::for_test_with_framework("shadcn");
+        assert!(is_in_framework_entry_dir(
+            &PathBuf::from("components/ui/button.tsx"),
+            &shadcn
+        ));
+    }
+
+    // A partial `app` match stays an ordinary module.
+    #[test]
+    fn framework_entry_dirs_still_need_whole_segments() {
+        let nextjs = ProjectCtx::for_test_with_framework("nextjs");
+        assert!(!is_framework_entry_point(
+            &PathBuf::from("webapp/page.tsx"),
+            &nextjs
+        ));
+        assert!(!is_in_framework_entry_dir(
+            &PathBuf::from("webapp/page.tsx"),
+            &nextjs
+        ));
     }
 }
