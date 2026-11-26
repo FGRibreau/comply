@@ -109,7 +109,7 @@ impl OxcCheck for Check {
         };
 
         // shadcn/ui primitives use arbitrary values by design.
-        let path_str = ctx.path.to_str().unwrap_or("");
+        let path_str = crate::rules::path_utils::path_for_matching(ctx.path);
         if path_str.contains("/components/ui/") || path_str.contains("/lib/ui/") {
             return;
         }
@@ -151,5 +151,34 @@ impl OxcCheck for Check {
             severity: Severity::Error,
             span: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_at(path: &str) -> Vec<Diagnostic> {
+        crate::rules::test_helpers::run_oxc_check(
+            &Check,
+            r#"export const A = () => <div className="bg-[#abc]" />;"#,
+            std::path::Path::new(path),
+            &crate::project::ProjectCtx::empty_with_tailwind(),
+            crate::rules::file_ctx::default_static_file_ctx(),
+        )
+    }
+
+    // `--staged` lists a root `components/ui/` file without `./`.
+    #[test]
+    fn skips_a_root_ui_library_dir() {
+        let d = run_at("components/ui/card.tsx");
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    // A partial `components` match stays application code.
+    #[test]
+    fn still_flags_an_arbitrary_value_near_a_ui_dir_substring() {
+        let d = run_at("mycomponents/ui/card.tsx");
+        assert_eq!(d.len(), 1, "{d:?}");
     }
 }

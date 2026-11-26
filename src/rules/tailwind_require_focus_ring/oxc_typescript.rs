@@ -54,7 +54,7 @@ impl OxcCheck for Check {
         };
 
         // shadcn/ui primitives handle focus indicators internally.
-        let path_str = ctx.path.to_str().unwrap_or("");
+        let path_str = crate::rules::path_utils::path_for_matching(ctx.path);
         if path_str.contains("/components/ui/") || path_str.contains("/lib/ui/") {
             return;
         }
@@ -296,5 +296,26 @@ mod tests {
             file,
         );
         assert!(d.is_empty());
+    }
+
+    fn run_at(path: &str) -> Vec<Diagnostic> {
+        let project = crate::project::ProjectCtx::empty_with_tailwind();
+        let file = crate::rules::file_ctx::default_static_file_ctx();
+        let src = r#"export const A = () => <button className="px-4" />;"#;
+        crate::rules::test_helpers::run_rule_with_ctx(&Check, src, path, &project, file)
+    }
+
+    // `--staged` lists a root `components/ui/` file without `./`.
+    #[test]
+    fn skips_a_root_ui_library_dir() {
+        let d = run_at("components/ui/button.tsx");
+        assert!(d.is_empty(), "{d:?}");
+    }
+
+    // A partial `components` match stays application code.
+    #[test]
+    fn still_flags_a_button_near_a_ui_dir_substring() {
+        let d = run_at("mycomponents/ui/button.tsx");
+        assert_eq!(d.len(), 1, "{d:?}");
     }
 }

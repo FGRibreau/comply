@@ -191,11 +191,11 @@ use std::path::Path;
 const RULE_ID: &str = "dead-export";
 
 /// Path segments that mark a directory as a reusable UI component library.
-/// Matched against the canonicalised path with forward-slash separators.
+/// Matched against `path_for_matching`, so a root `components/ui/` counts.
 const UI_LIBRARY_DIRS: &[&str] = &["/components/ui/", "/lib/ui/", "/src/components/ui/"];
 
 fn is_in_ui_library(path: &Path) -> bool {
-    let normalised = path.to_string_lossy().replace('\\', "/");
+    let normalised = crate::rules::path_utils::path_for_matching(path);
     UI_LIBRARY_DIRS.iter().any(|seg| normalised.contains(seg))
 }
 
@@ -5478,5 +5478,18 @@ mod tests {
             run_with_auto_import_config(no_plugin, YUDAO_IMPORTS_MAP, "src/hooks/web/useTable.ts");
         assert_eq!(diags.len(), 1, "no plugin dependency, no exemption: {diags:?}");
         assert!(diags[0].message.contains("`useTable`"), "{diags:?}");
+    }
+
+    // `--staged` lists a root `components/ui/` file without `./`.
+    #[test]
+    fn root_ui_library_dirs_are_ui_libraries() {
+        assert!(is_in_ui_library(Path::new("components/ui/button.tsx")));
+        assert!(is_in_ui_library(Path::new("lib/ui/card.tsx")));
+    }
+
+    // A partial `components` match stays application code.
+    #[test]
+    fn dir_near_a_ui_library_substring_is_not_one() {
+        assert!(!is_in_ui_library(Path::new("mycomponents/ui/button.tsx")));
     }
 }
