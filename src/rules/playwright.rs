@@ -26,7 +26,7 @@ pub fn is_playwright_context(ctx: &CheckCtx) -> bool {
         if !ctx.project.has_framework("playwright") {
             return false;
         }
-        let path = ctx.path.to_string_lossy();
+        let path = crate::rules::path_utils::path_for_matching(ctx.path);
         path.contains("/e2e/") || path.contains("/playwright/") || path.contains(".e2e.")
     })
 }

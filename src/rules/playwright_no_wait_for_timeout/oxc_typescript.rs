@@ -64,3 +64,38 @@ impl OxcCheck for Check {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The spec imports `test` from a local fixture module.
+    const FIXTURE_SPEC: &str = "import { test } from './fixtures';\n\
+                                test('a', async ({ page }) => {\n\
+                                  await page.waitForTimeout(1000);\n\
+                                });\n";
+
+    fn run_at(path: &str) -> Vec<Diagnostic> {
+        crate::rules::test_helpers::run_oxc_check(
+            &Check,
+            FIXTURE_SPEC,
+            std::path::Path::new(path),
+            &crate::project::ProjectCtx::for_test_with_framework("playwright"),
+            crate::rules::file_ctx::default_static_file_ctx(),
+        )
+    }
+
+    // `--staged` lists a root `e2e/` spec without a leading `./`.
+    #[test]
+    fn flags_wait_for_timeout_in_a_root_e2e_dir() {
+        let d = run_at("e2e/login.spec.ts");
+        assert_eq!(d.len(), 1, "{d:?}");
+    }
+
+    // Nothing else marks this spec as a Playwright file.
+    #[test]
+    fn ignores_a_spec_near_an_e2e_substring() {
+        let d = run_at("src/e2e-utils/login.spec.ts");
+        assert!(d.is_empty(), "{d:?}");
+    }
+}
