@@ -706,6 +706,127 @@ fn two_staged_copies_are_reported_once_on_the_last_path_issue_8611() {
     }
 }
 
+#[test]
+fn full_and_staged_scans_agree_on_root_level_dirs() {
+    // `comply .` lists `./test/x` while `--staged` lists `test/x`.
+    // Directory predicates must reach one verdict for both spellings.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let files = [
+        (
+            "package.json",
+            r#"{"name":"t","private":true,"dependencies":{"next":"14.2.0","express":"4.21.0","react":"18.3.1","tailwindcss":"3.4.0","i18next":"23.0.0","better-result":"1.0.0","drizzle-orm":"0.33.0","pg":"8.12.0"},"devDependencies":{"@playwright/test":"1.48.0","drizzle-kit":"0.24.0"}}"#,
+        ),
+        (
+            "components/ui/button.jsx",
+            "export function Button() {\n  return <button className=\"px-4\">ok</button>;\n}\n",
+        ),
+        (
+            "locales/common.json",
+            "{\"home\":{\"title\":\"x\"},\"empty\":\"\"}\n",
+        ),
+        (
+            "lib/find.ts",
+            "import { Result } from \"better-result\";\n\
+             export async function findUser(id: string): Promise<string | null> {\n  \
+             await Result.ok(id);\n  return null;\n}\n",
+        ),
+        (
+            "migrations/001.ts",
+            "import { defineConfig } from \"drizzle-kit\";\nexport default defineConfig({});\n",
+        ),
+        (
+            "api/db.ts",
+            "import { Pool } from \"pg\";\nexport const pool = new Pool({ max: 10 });\n",
+        ),
+        (
+            "examples/demo.ts",
+            "export function f() {\n  return foo(86400);\n}\n",
+        ),
+        (
+            "app/page.jsx",
+            "console.log(\"boot\");\nexport default function Page() {\n  return <div>page</div>;\n}\n",
+        ),
+        (
+            "routes/users.js",
+            "console.log(\"routes\");\nexport function list() {\n  return [];\n}\n",
+        ),
+        (
+            "src/pages/Home.jsx",
+            "export default function Home() {\n  return <div>home</div>;\n}\n",
+        ),
+        (
+            "test/route.jsx",
+            "import React from \"react\";\nimport Home from \"../src/pages/Home.jsx\";\n\
+             export function App() {\n  return <Home />;\n}\n",
+        ),
+        (
+            "fixtures/clump.js",
+            "export function sum(alpha, beta, gamma) { return alpha + beta + gamma; }\n\
+             export function product(alpha, beta, gamma) { return alpha * beta * gamma; }\n",
+        ),
+        (
+            "__mocks__/re.js",
+            "export function build(x) {\n  return new RegExp(x);\n}\n",
+        ),
+        (
+            "e2e/fixtures.js",
+            "export { test } from \"@playwright/test\";\n",
+        ),
+        (
+            "e2e/login.spec.js",
+            "import { test } from \"./fixtures.js\";\n\
+             test(\"login\", async ({ page }) => {\n  await page.waitForTimeout(1000);\n});\n",
+        ),
+    ];
+    for (path, content) in files {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, content).unwrap();
+    }
+    git(root, &["init", "-q"]);
+    git(root, &["add", "-A"]);
+
+    let rules = [
+        "no-side-effects-in-initialization",
+        "perf-route-level-code-split",
+        "data-clumps",
+        "no-new-regex-with-variable",
+        "playwright-no-wait-for-timeout",
+        "tailwind-require-focus-ring",
+        "dead-export",
+        "i18n-json-no-nesting",
+        "i18n-json-no-empty-values",
+        "better-result-no-nullable-return",
+        "drizzle-no-drizzle-kit-in-runtime",
+        "drizzle-serverless-pool-max-one",
+        "no-magic-numbers",
+    ];
+    let findings = |scope: &str| -> std::collections::BTreeSet<String> {
+        let out = common::comply()
+            .current_dir(root)
+            .args([scope, "--json"])
+            .output()
+            .unwrap();
+        let all: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+        all.iter()
+            .filter(|f| rules.contains(&f["ruleId"].as_str().unwrap()))
+            .map(|f| {
+                let path = f["path"].as_str().unwrap();
+                let path = path.strip_prefix("./").unwrap_or(path);
+                format!("{path}:{} {}", f["line"], f["ruleId"].as_str().unwrap())
+            })
+            .collect()
+    };
+    let full = findings(".");
+    assert!(
+        full.iter()
+            .any(|f| f.ends_with("playwright-no-wait-for-timeout")),
+        "{full:?}"
+    );
+    assert_eq!(full, findings("--staged"));
+}
+
 /// A one-crate workspace holding `files` (path, content).
 fn rust_crate(files: &[(&str, &str)]) -> TempDir {
     let dir = TempDir::new().unwrap();
